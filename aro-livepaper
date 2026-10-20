@@ -1,0 +1,9 @@
+#!/bin/sh
+# aro-livepaper — launcher. gtk4-layer-shell harus dimuat sebelum libwayland (wajib untuk Python)
+LIB=/usr/lib/libgtk4-layer-shell.so
+[ -e "$LIB" ] || { echo "gtk4-layer-shell belum terpasang ($LIB)" >&2; exit 1; }
+# cegah dua instance (mis. aro reload)
+if [ "$1" != "--preview" ] && pgrep -u "$(id -u)" -f 'aro-livepaper/livepaper.py' >/dev/null; then
+    exit 0
+fi
+LD_PRELOAD="$LIB${LD_PRELOAD:+:$LD_PRELOAD}" exec python3 /usr/local/share/aro-livepaper/livepaper.py "$@"
