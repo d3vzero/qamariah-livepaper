@@ -1012,15 +1012,148 @@ def _valley_layout(w, H, Y):
     return result
 
 
+_VALLEY_GROUND = {"key": None, "surf": None}
+
+
+def _valley_static(ctx, L, w, H, Y, lum):
+    """bagian diam lembah dalam koordinat layar global (Y = cakrawala, H = tinggi layar)."""
+    import cairo
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
+    G = H - Y
+
+    # a. Floor lines
+    for (x0, y), (x1, y) in L["floor"]:
+        v = (y - Y) / G
+        xl = _interp_x(L["river"][0], y)
+        xr = _interp_x(L["river"][1], y)
+        al = (0.10 + 0.12 * v) * lum
+        ctx.set_source_rgba(1, 1, 1, al)
+        ctx.set_line_width(1)
+        ctx.move_to(0, y)
+        ctx.line_to(xl - 0.01 * w, y)
+        ctx.stroke()
+        ctx.set_source_rgba(1, 1, 1, al)
+        ctx.set_line_width(1)
+        ctx.move_to(xr + 0.01 * w, y)
+        ctx.line_to(w, y)
+        ctx.stroke()
+
+    # b. River edges
+    ctx.set_source_rgba(1, 1, 1, 0.40 * lum)
+    ctx.set_line_width(1.2)
+    for edge in L["river"]:
+        ctx.move_to(edge[0][0], edge[0][1])
+        for px, py in edge[1:]:
+            ctx.line_to(px, py)
+        ctx.stroke()
+
+    # c. Mountain
+    pts = L["mountain"]
+    ctx.move_to(pts[0][0], pts[0][1])
+    for px, py in pts[1:]:
+        ctx.line_to(px, py)
+    ctx.line_to(pts[-1][0], Y + 2)
+    ctx.line_to(pts[0][0], Y + 2)
+    ctx.close_path()
+    ctx.set_source_rgb(0, 0, 0)
+    ctx.fill()
+    ctx.move_to(pts[0][0], pts[0][1])
+    for px, py in pts[1:]:
+        ctx.line_to(px, py)
+    ctx.set_source_rgba(1, 1, 1, 0.55 * lum)
+    ctx.set_line_width(1.5)
+    ctx.stroke()
+
+    # d. Snow
+    ctx.set_source_rgba(1, 1, 1, 0.35 * lum)
+    ctx.set_line_width(1)
+    for (x0, y0), (x1, y1) in L["snow"]:
+        ctx.move_to(x0, y0)
+        ctx.line_to(x1, y1)
+    ctx.stroke()
+
+    # e. Cliffs
+    for (pts, outer_x), ridge in (
+        ((L["left"], -10), L["left_ridge"]),
+        ((L["right"], w + 10), L["right_ridge"]),
+    ):
+        # polygon path
+        ctx.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            ctx.line_to(px, py)
+        ctx.line_to(outer_x, H + 4)
+        ctx.line_to(outer_x, pts[0][1])
+        ctx.close_path()
+        ctx.set_source_rgb(0, 0, 0)
+        ctx.fill()
+
+        # texture layers (clip)
+        ctx.save()
+        ctx.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            ctx.line_to(px, py)
+        ctx.line_to(outer_x, H + 4)
+        ctx.line_to(outer_x, pts[0][1])
+        ctx.close_path()
+        ctx.clip()
+        ctx.set_source_rgba(1, 1, 1, 0.14 * lum)
+        ctx.set_line_width(1)
+        for k in range(1, 6):                        # lapisan batu sejajar punggung tebing
+            off = k * 0.06 * H
+            ctx.move_to(ridge[0][0], ridge[0][1] + off)
+            for px, py in ridge[1:]:
+                ctx.line_to(px, py + off)
+            ctx.set_dash([0.02 * w, 0.012 * w], k * 37)
+            ctx.stroke()
+        ctx.restore()
+
+        # cliff edge
+        ctx.set_source_rgba(1, 1, 1, 0.6 * lum)
+        ctx.set_line_width(1.6)
+        ctx.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            ctx.line_to(px, py)
+        ctx.stroke()
+
+    # f. Trees
+    ctx.set_source_rgba(1, 1, 1, 0.45 * lum)
+    ctx.set_line_width(1)
+    for (x, y, s) in L["trees"]:
+        ctx.move_to(x, y)
+        ctx.line_to(x, y - s)
+        ctx.move_to(x - 0.3 * s, y - 0.35 * s)
+        ctx.line_to(x, y - s)
+        ctx.line_to(x + 0.3 * s, y - 0.35 * s)
+    ctx.stroke()
+
+
 def draw_valley_sky(ctx, w, h, a, t, cfg, wx, h_total):
     """bagian lembah yang menjulang di atas cakrawala (tebing, gunung); ikut cache langit."""
-    pass
+    lum = round(scene_lum(a, cfg, wx), 3)
+    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
+    ctx.save()
+    ctx.translate(dx, dy)
+    _valley_static(ctx, _valley_layout(w, h_total, h), w, h_total, h, lum)
+    ctx.restore()
 
 
 def draw_valley(ctx, w, h, a, t, cfg, h_sky, wx=None):
     """lembah di bawah cakrawala."""
+    import cairo
     wx = wx or WEATHER_FIXED["clear"]
-    ctx.set_source_rgb(0, 0, 0)
+    lum = round(scene_lum(a, cfg, wx), 3)
+    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
+    key = (w, h, h_sky, lum, dx, dy)
+    if _VALLEY_GROUND["key"] != key:
+        surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
+        c = cairo.Context(surf)
+        c.set_source_rgb(0, 0, 0)
+        c.paint()
+        c.translate(dx, dy - h_sky)
+        _valley_static(c, _valley_layout(w, h_sky + h, h_sky), w, h_sky + h, h_sky, lum)
+        _VALLEY_GROUND["key"], _VALLEY_GROUND["surf"] = key, surf
+    ctx.set_source_surface(_VALLEY_GROUND["surf"], 0, 0)
     ctx.paint()
     draw_rain(ctx, w, h_sky, h_sky + h, h_sky + h, wx, t)
     draw_lightning(ctx, wx, t, cfg)
