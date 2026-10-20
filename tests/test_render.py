@@ -28,13 +28,17 @@ CASES = [
     ("malam-badai",    "2026-10-20 22:00", "storm"),
     ("purnama-kabut",  "2026-10-26 22:00", "fog"),
     ("sore-sim",       "2026-10-20 15:30", "sim"),
+    ("valley-siang",   "2026-10-20 12:00", "clear", "valley"),
+    ("valley-senja",   "2026-10-20 18:05", "clear", "valley"),
+    ("valley-malam",   "2026-10-20 22:00", "clear", "valley"),
+    ("valley-hujan",   "2026-10-20 18:05", "rain",  "valley"),
 ]
 # toleransi perbandingan dengan acuan
 MAX_DIFF_PIXELS = 0.0005   # pecahan piksel yang boleh berbeda
 MAX_CHANNEL_DIFF = 24      # selisih terbesar satu kanal (0..255)
 
 
-def render(out, when, weather, size=SIZE):
+def render(out, when, weather, scene=None, size=SIZE):
     cmd = [
         sys.executable,
         os.path.join(ROOT, "livepaper.py"),
@@ -43,6 +47,8 @@ def render(out, when, weather, size=SIZE):
         "--time", when,
         "--weather", weather,
     ]
+    if scene:
+        cmd += ["--scene", scene]
     tmpconfig = tempfile.mkdtemp()
     env = dict(os.environ)
     env["TZ"] = "Asia/Jakarta"
@@ -68,15 +74,15 @@ class Render(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.TemporaryDirectory()
-        for nama, when, weather in CASES:
-            render(os.path.join(cls.tmpdir.name, "%s.png" % nama), when, weather)
+        for nama, *args in CASES:
+            render(os.path.join(cls.tmpdir.name, "%s.png" % nama), *args)
 
     @classmethod
     def tearDownClass(cls):
         cls.tmpdir.cleanup()
 
     def test_no_error_and_size(self):
-        for nama, when, weather in CASES:
+        for nama, *_ in CASES:
             with self.subTest(nama=nama):
                 path = os.path.join(self.tmpdir.name, "%s.png" % nama)
                 self.assertTrue(os.path.isfile(path), "%s tidak ada" % path)
@@ -85,7 +91,7 @@ class Render(unittest.TestCase):
                                  "%s ukuran (%d,%d) != %s" % (nama, w, h, SIZE))
 
     def test_mostly_black(self):
-        for nama, when, weather in CASES:
+        for nama, *_ in CASES:
             with self.subTest(nama=nama):
                 path = os.path.join(self.tmpdir.name, "%s.png" % nama)
                 w, h, arr = load(path)
@@ -100,14 +106,14 @@ class Render(unittest.TestCase):
         update = os.environ.get("UPDATE_REF") == "1"
         if update:
             os.makedirs(REF, exist_ok=True)
-            for nama, when, weather in CASES:
+            for nama, *_ in CASES:
                 src = os.path.join(self.tmpdir.name, "%s.png" % nama)
                 dst = os.path.join(REF, "%s.png" % nama)
                 with open(src, "rb") as sf, open(dst, "wb") as df:
                     df.write(sf.read())
             self.skipTest("acuan diperbarui")
 
-        for nama, when, weather in CASES:
+        for nama, *_ in CASES:
             with self.subTest(nama=nama):
                 ref_path = os.path.join(REF, "%s.png" % nama)
                 self.assertTrue(os.path.isfile(ref_path),
