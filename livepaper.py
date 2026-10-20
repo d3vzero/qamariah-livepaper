@@ -28,6 +28,7 @@ Pakai:
   qamariah-livepaper --preview out.png  render satu gambar (tanpa GTK)
       [--size 2560x1600] [--time "2026-10-20 19:30"]
       [--weather clear|cloudy|rain|storm|fog|sim|live]
+      [--scene sea|valley]
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -57,6 +58,7 @@ DEFAULTS = {
     "clouds_max": "16",     # jumlah awan saat mendung penuh
     "lightning": "yes",     # kilat redup saat badai
     "sky_fps": "4",         # fps langit saat ada awan (hujan memakai fps laut)
+    "scene": "sea",         # sea | valley (pemandangan di bawah cakrawala)
 }
 
 
@@ -72,6 +74,11 @@ def load_config():
         path = old
     cp.read(path)
     c = cp["livepaper"]
+    scene = c.get("scene").strip().lower()
+    if scene not in SCENES:
+        print("qamariah-livepaper: scene tidak dikenal '%s', memakai sea" % scene,
+              file=sys.stderr)
+        scene = "sea"
     return {
         "lat": c.getfloat("lat"), "lon": c.getfloat("lon"),
         "fps": max(1, min(30, c.getint("fps"))),
@@ -88,6 +95,7 @@ def load_config():
         "clouds_max": max(0, min(40, c.getint("clouds_max"))),
         "lightning": c.getboolean("lightning"),
         "sky_fps": max(1, min(30, c.getint("sky_fps"))),
+        "scene": scene,
     }
 
 
@@ -496,7 +504,7 @@ def _cloud_veil(wx):
     return veil
 
 
-def draw_sky_base(ctx, w, h, a, t, cfg, wx=None):
+def draw_sky_base(ctx, w, h, a, t, cfg, wx=None, h_total=None):
     """bagian langit yang berubah lambat: bintang, planet, matahari, bulan."""
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
@@ -525,6 +533,10 @@ def draw_sky_base(ctx, w, h, a, t, cfg, wx=None):
     if veil > 0:
         ctx.set_source_rgba(0, 0, 0, veil)
         ctx.paint()
+    sky_part = SCENES[cfg.get("scene", "sea")][0]
+    if sky_part:
+        sky_part(ctx, w, h, a, t, cfg, wx or WEATHER_FIXED["clear"],
+                 h_total or round(h / cfg["horizon"]))
 
 
 def _frac(x):
@@ -736,9 +748,18 @@ def draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total):
 
 
 def draw_sky(ctx, w, h, a, t, cfg, wx=None, h_total=None):
-    draw_sky_base(ctx, w, h, a, t, cfg, wx)
+    draw_sky_base(ctx, w, h, a, t, cfg, wx, h_total)
     if wx:
         draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total or h)
+
+
+def scene_lum(a, cfg, wx):
+    """kecerahan garis pemandangan: redup di malam hari (lebih terang saat bulan terang),
+    saat mendung, dan saat kabut."""
+    moon_up = moon_visible(a, cfg)
+    lum = 1.0 - a["night"] * (0.38 - 0.25 * (a["illum"] if moon_up else 0))
+    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - (0.3 if wx["fog"] else 0)
+    return lum
 
 
 def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
@@ -757,8 +778,7 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     direc = a["wave_dir"]
     ctx.set_line_cap(1)  # ROUND
     moon_up = moon_visible(a, cfg)
-    lum = 1.0 - a["night"] * (0.38 - 0.25 * (a["illum"] if moon_up else 0))
-    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - (0.3 if wx["fog"] else 0)
+    lum = scene_lum(a, cfg, wx)
     xs, X = _sea_xs(w, step)
     for i in range(n):
         u = (i + 1) / n                              # 0 = cakrawala, 1 = depan
@@ -809,6 +829,32 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     draw_lightning(ctx, wx, t, cfg)
 
 
+def draw_valley_sky(ctx, w, h, a, t, cfg, wx, h_total):
+    """bagian lembah yang menjulang di atas cakrawala (tebing, gunung); ikut cache langit."""
+    pass
+
+
+def draw_valley(ctx, w, h, a, t, cfg, h_sky, wx=None):
+    """lembah di bawah cakrawala."""
+    wx = wx or WEATHER_FIXED["clear"]
+    ctx.set_source_rgb(0, 0, 0)
+    ctx.paint()
+    draw_rain(ctx, w, h_sky, h_sky + h, h_sky + h, wx, t)
+    draw_lightning(ctx, wx, t, cfg)
+
+
+# scene: (bagian di atas cakrawala yang ikut cache langit, bagian di bawah cakrawala)
+SCENES = {
+    "sea": (None, draw_sea),
+    "valley": (draw_valley_sky, draw_valley),
+}
+
+
+def draw_ground(ctx, w, h, a, t, cfg, h_sky, wx=None):
+    """pemandangan di bawah cakrawala sesuai cfg["scene"]."""
+    SCENES[cfg.get("scene", "sea")][1](ctx, w, h, a, t, cfg, h_sky, wx)
+
+
 # ── preview (tanpa GTK) ─────────────────────────────────────────────────────
 def full_state(now, cfg):
     a = astro(now, cfg["lat"], cfg["lon"])
@@ -816,12 +862,16 @@ def full_state(now, cfg):
     return a
 
 
-def preview(out, size, when, weather=None):
+def preview(out, size, when, weather=None, scene=None):
     import cairo
     cfg = load_config()
     cfg["lightning"] = False                         # kilat hanya sesaat; jangan ikut di gambar diam
     if weather:
         cfg["weather"] = weather
+    if scene is not None:
+        if scene not in SCENES:
+            sys.exit("scene tidak dikenal: %s" % scene)
+        cfg["scene"] = scene
     w, h = (int(v) for v in size.lower().split("x"))
     now = (datetime.strptime(when, "%Y-%m-%d %H:%M").astimezone() if when
            else datetime.now().astimezone())
@@ -838,7 +888,7 @@ def preview(out, size, when, weather=None):
     ctx.translate(0, h_sky)
     ctx.rectangle(0, 0, w, h - h_sky)
     ctx.clip()
-    draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
+    draw_ground(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
     ctx.restore()
     surf.write_to_png(out)
     deg = lambda r: r / D2R
@@ -916,7 +966,7 @@ def run():
             key = (w, h, state["gen"])
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
                 surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"])
+                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"], geo.height)
                 cache["surf"], cache["key"] = surf, key
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
@@ -924,8 +974,8 @@ def run():
                 draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, geo.height)
 
         sky.set_draw_func(draw_sky_cb)
-        sea.set_draw_func(lambda _a, c, w, h: draw_sea(c, w, h, state["a"], time.time(), cfg,
-                                                       sky.get_height(), state["wx"]))
+        sea.set_draw_func(lambda _a, c, w, h: draw_ground(c, w, h, state["a"], time.time(), cfg,
+                                                          sky.get_height(), state["wx"]))
         box.append(sky); box.append(sea)
         win.set_child(box)
 
@@ -962,6 +1012,7 @@ if __name__ == "__main__":
         size = args[args.index("--size") + 1] if "--size" in args else "2560x1600"
         when = args[args.index("--time") + 1] if "--time" in args else None
         wthr = args[args.index("--weather") + 1] if "--weather" in args else None
-        preview(out, size, when, wthr)
+        scn = args[args.index("--scene") + 1] if "--scene" in args else None
+        preview(out, size, when, wthr, scn)
     else:
         run()
