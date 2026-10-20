@@ -829,6 +829,189 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     draw_lightning(ctx, wx, t, cfg)
 
 
+_VALLEY_LAYOUT = {}
+
+
+def _lerp_pts(ctrl, step, jit, rng):
+    """titik rapat di sepanjang garis kontrol; titik tengah digeser acak ±jit (y)."""
+    out = []
+    for p, q in zip(ctrl, ctrl[1:]):
+        dx = q[0] - p[0]
+        dy = q[1] - p[1]
+        n = max(1, math.ceil(math.sqrt(dx * dx + dy * dy) / step))
+        for k in range(n):
+            out.append((p[0] + dx * k / n, p[1] + dy * k / n))
+    out.append(ctrl[-1])
+    for i in range(1, len(out) - 1):
+        out[i] = (out[i][0], out[i][1] + rng.uniform(-jit, jit))
+    return out
+
+
+def _interp_y(pts, x):
+    x0 = pts[0][0]
+    x1 = pts[-1][0]
+    lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
+    if x <= lo:
+        return pts[0][1] if x0 <= x1 else pts[-1][1]
+    if x >= hi:
+        return pts[-1][1] if x0 <= x1 else pts[0][1]
+    for i in range(len(pts) - 1):
+        x0i, y0i = pts[i]
+        x1i, y1i = pts[i + 1]
+        if abs(x1i - x0i) < 1e-12:
+            continue
+        a, b = (x0i, x1i) if x0i <= x1i else (x1i, x0i)
+        if (x - a) * (x - b) <= 0:
+            t = (x - x0i) / (x1i - x0i)
+            return y0i + t * (y1i - y0i)
+    return pts[-1][1]
+
+
+def _interp_x(pts, y):
+    y0 = pts[0][1]
+    y1 = pts[-1][1]
+    lo, hi = (y0, y1) if y0 <= y1 else (y1, y0)
+    if y <= lo:
+        return pts[0][0] if y0 <= y1 else pts[-1][0]
+    if y >= hi:
+        return pts[-1][0] if y0 <= y1 else pts[0][0]
+    for i in range(len(pts) - 1):
+        x0i, yi = pts[i][0], pts[i][1]
+        x1i, y1i = pts[i + 1][0], pts[i + 1][1]
+        if abs(y1i - yi) < 1e-12:
+            continue
+        a, b = (yi, y1i) if yi <= y1i else (y1i, yi)
+        if (y - a) * (y - b) <= 0:
+            t = (y - yi) / (y1i - yi)
+            return x0i + t * (x1i - x0i)
+    return pts[-1][0]
+
+
+def _valley_layout(w, H, Y):
+    """tata letak lembah (seed tetap) dalam koordinat layar global; Y = cakrawala."""
+    import random
+    rng = random.Random(20261021)
+    key = (w, H, Y)
+    if key in _VALLEY_LAYOUT:
+        return _VALLEY_LAYOUT[key]
+    G = H - Y
+
+    # left cliff
+    l_ridge = _lerp_pts([(-0.01 * w, 0.38 * Y), (0.20 * w, 0.55 * Y), (0.41 * w, Y - 0.05 * H)],
+                        0.012 * w, 0.006 * H, rng)
+    l_face = _lerp_pts([(0.41 * w, Y - 0.05 * H), (0.425 * w, Y - 0.01 * H), (0.43 * w, Y + 0.02 * G)],
+                       0.01 * H, 0, rng)
+    for i in range(1, len(l_face) - 1):
+        l_face[i] = (l_face[i][0] + rng.uniform(-0.004 * w, 0.004 * w), l_face[i][1])
+    l_base = _lerp_pts([(0.43 * w, Y + 0.02 * G), (0.30 * w, Y + 0.35 * G), (0.10 * w, H + 4)],
+                       0.02 * w, 0.004 * H, rng)
+    left = l_ridge + l_face[1:] + l_base[1:]
+
+    # right cliff
+    r_ridge = _lerp_pts([(1.01 * w, 0.30 * Y), (0.80 * w, 0.50 * Y), (0.59 * w, Y - 0.06 * H)],
+                        0.012 * w, 0.006 * H, rng)
+    r_face = _lerp_pts([(0.59 * w, Y - 0.06 * H), (0.575 * w, Y - 0.01 * H), (0.57 * w, Y + 0.02 * G)],
+                       0.01 * H, 0, rng)
+    for i in range(1, len(r_face) - 1):
+        r_face[i] = (r_face[i][0] + rng.uniform(-0.004 * w, 0.004 * w), r_face[i][1])
+    r_base = _lerp_pts([(0.57 * w, Y + 0.02 * G), (0.70 * w, Y + 0.35 * G), (0.90 * w, H + 4)],
+                       0.02 * w, 0.004 * H, rng)
+    right = r_ridge + r_face[1:] + r_base[1:]
+
+    # mountain
+    mountain = _lerp_pts(
+        [(0.33 * w, Y), (0.39 * w, Y - 0.05 * H), (0.42 * w, Y - 0.08 * H), (0.455 * w, Y - 0.06 * H),
+         (0.50 * w, Y - 0.13 * H), (0.545 * w, Y - 0.07 * H), (0.58 * w, Y - 0.095 * H),
+         (0.62 * w, Y - 0.04 * H), (0.67 * w, Y)],
+        0.006 * w, 0.004 * H, rng)
+
+    # snow
+    snowline = Y - 0.065 * H
+    snow = []
+    for x, y in mountain:
+        if y < snowline:
+            snow.append(((x, y),
+                         (x + rng.uniform(-0.002 * w, 0.002 * w),
+                          y + rng.uniform(0.3, 0.9) * (snowline - y))))
+
+    # trees
+    trees = []
+    for ridge in [l_ridge, r_ridge]:
+        x0 = ridge[0][0]
+        x1 = ridge[-1][0]
+        x = x0
+        while (x < x1) if x0 < x1 else (x > x1):
+            u = (x - x0) / (x1 - x0) if x1 != x0 else 0
+            y = _interp_y(ridge, x)
+            s = 0.014 * H * (1 - 0.6 * u) * rng.uniform(0.6, 1.2)
+            trees.append((x, y, s))
+            x += math.copysign(w * rng.uniform(0.006, 0.014) * (1 - 0.5 * u), x1 - x0)
+
+    # river
+    river_l, river_r, river_c = [], [], []
+    for k in range(81):
+        v = k / 80
+        y = Y + 0.01 * G + v ** 1.5 * 0.99 * G
+        xc = 0.5 * w + 0.10 * w * v * math.sin(v * 3.2 * math.pi + 0.6)
+        hw = 0.003 * w + 0.05 * w * v ** 1.4
+        river_l.append((xc - hw, y))
+        river_r.append((xc + hw, y))
+        river_c.append((xc, y, hw))
+
+    # floor
+    floor = []
+    for i in range(1, 7):
+        v = (i / 7) ** 1.6
+        y = Y + v * G
+        floor.append(((0.0, y), (w, y)))
+
+    # fall
+    xf = 0.70 * w
+    y_top = Y + 0.02 * G
+    y_bot = _interp_y(r_base, xf)
+
+    # lights
+    lights = []
+    for _ in range(40):
+        v = rng.uniform(0.08, 0.6)
+        idx = round(v * 80)
+        xc, y, hw = river_c[idx]
+        side = rng.choice((-1, 1))
+        lx = xc + side * (hw + rng.uniform(0.01, 0.07) * w)
+        sz = rng.uniform(0.8, 1.6) * (1 + v)
+        if _interp_x(l_base, y) + 0.01 * w < lx < _interp_x(r_base, y) - 0.01 * w:
+            lights.append((lx, y + rng.uniform(-0.01, 0.01) * G, sz))
+
+    # glints
+    glints = []
+    for _ in range(16):
+        v = rng.uniform(0.05, 0.95)
+        idx = round(v * 80)
+        xc, y, hw = river_c[idx]
+        glints.append((xc + rng.uniform(-0.5, 0.5) * hw, y, 0.25 * hw + 2,
+                       rng.uniform(0, 2 * math.pi)))
+
+    result = {
+        "left": left,
+        "right": right,
+        "left_ridge": l_ridge,
+        "right_ridge": r_ridge,
+        "left_base": l_base,
+        "right_base": r_base,
+        "mountain": mountain,
+        "snow": snow,
+        "trees": trees,
+        "river": (river_l, river_r),
+        "river_c": river_c,
+        "floor": floor,
+        "fall": (xf, y_top, y_bot),
+        "lights": lights,
+        "glints": glints,
+    }
+    _VALLEY_LAYOUT[key] = result
+    return result
+
+
 def draw_valley_sky(ctx, w, h, a, t, cfg, wx, h_total):
     """bagian lembah yang menjulang di atas cakrawala (tebing, gunung); ikut cache langit."""
     pass
