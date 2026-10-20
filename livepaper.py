@@ -1128,6 +1128,52 @@ def _valley_static(ctx, L, w, H, Y, lum):
     ctx.stroke()
 
 
+def _valley_anim(ctx, L, w, H, Y, a, t, lum):
+    """animasi per-frame lembah: air terjun, kilau sungai, lampu desa."""
+    xf, y_top, y_bot = L["fall"]
+    total_dash = 0.012 * H + 0.008 * H
+    for k in (-1, 0, 1):
+        x = xf + k * 0.0025 * w
+        ctx.set_dash([0.012 * H, 0.008 * H],
+                     -(t * 0.10 * H + k * 0.007 * H) % total_dash)
+        ctx.set_source_rgba(1, 1, 1, 0.5 * lum)
+        ctx.set_line_width(1.2)
+        ctx.move_to(x, y_top)
+        ctx.line_to(x, y_bot)
+        ctx.stroke()
+    ctx.set_dash([])
+
+    for j in range(4):
+        ph = t * 3.1 + j * 1.9
+        al = 0.30 * lum * (0.5 + 0.5 * math.sin(ph))
+        x0 = xf - 0.006 * w + j * 0.004 * w
+        y0 = y_bot - 2
+        x1 = xf - 0.008 * w + j * 0.0053 * w
+        y1 = y_bot - 2 - 0.006 * H * (0.6 + 0.4 * math.sin(ph * 1.3))
+        ctx.set_source_rgba(1, 1, 1, al)
+        ctx.set_line_width(1)
+        ctx.move_to(x0, y0)
+        ctx.line_to(x1, y1)
+        ctx.stroke()
+
+    for (x, y, half, ph) in L["glints"]:
+        al = 0.28 * lum * max(0.0, math.sin(t * 1.1 + ph)) ** 2
+        if al < 0.02:
+            continue
+        ctx.set_source_rgba(1, 1, 1, al)
+        ctx.set_line_width(1.2)
+        ctx.move_to(x - half, y)
+        ctx.line_to(x + half, y)
+        ctx.stroke()
+
+    if a["night"] > 0:
+        for i, (x, y, size) in enumerate(L["lights"]):
+            al = a["night"] * (0.55 + 0.15 * math.sin(t * 0.7 + i * 1.9))
+            ctx.set_source_rgba(1, 1, 1, al)
+            ctx.arc(x, y, size / 2 + 0.5, 0, 2 * math.pi)
+            ctx.fill()
+
+
 def draw_valley_sky(ctx, w, h, a, t, cfg, wx, h_total):
     """bagian lembah yang menjulang di atas cakrawala (tebing, gunung); ikut cache langit."""
     lum = round(scene_lum(a, cfg, wx), 3)
@@ -1155,6 +1201,10 @@ def draw_valley(ctx, w, h, a, t, cfg, h_sky, wx=None):
         _VALLEY_GROUND["key"], _VALLEY_GROUND["surf"] = key, surf
     ctx.set_source_surface(_VALLEY_GROUND["surf"], 0, 0)
     ctx.paint()
+    ctx.save()
+    ctx.translate(dx, dy - h_sky)
+    _valley_anim(ctx, _valley_layout(w, h_sky + h, h_sky), w, h_sky + h, h_sky, a, t, lum)
+    ctx.restore()
     draw_rain(ctx, w, h_sky, h_sky + h, h_sky + h, wx, t)
     draw_lightning(ctx, wx, t, cfg)
 
