@@ -26,9 +26,10 @@ def parse_size(s):
     return int(w), int(h)
 
 
-def bench(cases, size, frames):
+def bench(cases, size, frames, scene="sea"):
     w, h = size
     cfg = livepaper.load_config()
+    cfg["scene"] = scene
     cfg["lightning"] = False
     h_sky = int(h * cfg["horizon"])
 
@@ -47,26 +48,26 @@ def bench(cases, size, frames):
         # --- base ---
         base_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h_sky)
         if wx_in_base:
-            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx)
+            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx, h)
         else:
             livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg)
         t_start = time.perf_counter()
         ctx_b = cairo.Context(base_surf)
         if wx_in_base:
-            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx)
+            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx, h)
         else:
             livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg)
         base_ms = (time.perf_counter() - t_start) * 1000
 
-        # --- sea ---
+        # --- laut / lembah (sesuai scene) ---
         sea_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h - h_sky)
         # warmup
-        livepaper.draw_sea(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
+        livepaper.draw_ground(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
         # measure
         sea_total = 0.0
         for k in range(frames):
             t_start = time.perf_counter()
-            livepaper.draw_sea(
+            livepaper.draw_ground(
                 cairo.Context(sea_surf), w, h - h_sky, a,
                 t0 + k / cfg["fps"], cfg, h_sky, wx
             )
@@ -110,16 +111,16 @@ def bench(cases, size, frames):
     return results
 
 
-def print_table(results, size, frames, repeat):
-    print(f"ukuran {size[0]}x{size[1]}, {frames} frame, terbaik dari {repeat}")
+def print_table(results, size, frames, repeat, scene):
+    print(f"scene {scene}, ukuran {size[0]}x{size[1]}, {frames} frame, terbaik dari {repeat}")
     print(
-        f"{'kasus':<14}{'base ms':>9}  {'laut ms/frame':>13}  "
+        f"{'kasus':<14}{'base ms':>9}  {'bawah ms/frame':>14}  "
         f"{'langit ms/frame':>15}  {'langit fps':>10}  "
         f"{'render ms/detik':>16}  {'% core':>7}"
     )
     for name, base_ms, sea_ms, sky_ms, sky_fps, render_ms, pct in results:
         print(
-            f"{name:<14}{base_ms:>9.2f}  {sea_ms:>13.2f}  "
+            f"{name:<14}{base_ms:>9.2f}  {sea_ms:>14.2f}  "
             f"{sky_ms:>15.2f}  {sky_fps:>10d}  "
             f"{render_ms:>16.1f}  {pct:>6.1f}"
         )
@@ -141,19 +142,21 @@ def main():
                         help="Jumlah frame per pengukuran (default: 120)")
     parser.add_argument("--repeat", type=int, default=3,
                         help="Ulangi pengukuran, ambil tercepat (default: 3)")
+    parser.add_argument("--scene", default="sea", choices=sorted(livepaper.SCENES),
+                        help="Pemandangan di bawah cakrawala (default: sea)")
     args = parser.parse_args()
 
     best = None
     best_total = float("inf")
 
     for r in range(args.repeat):
-        res = bench(cases, args.size, args.frames)
+        res = bench(cases, args.size, args.frames, args.scene)
         total = sum(r_[5] for r_ in res)
         if total < best_total:
             best_total = total
             best = res
 
-    print_table(best, args.size, args.frames, args.repeat)
+    print_table(best, args.size, args.frames, args.repeat, args.scene)
 
 
 if __name__ == "__main__":
