@@ -6,4 +6,8 @@ LIB=/usr/lib/libgtk4-layer-shell.so
 if [ "$1" != "--preview" ] && pgrep -u "$(id -u)" -f 'qamariah-livepaper/livepaper.py' >/dev/null; then
     exit 0
 fi
+# renderer GTK4: gambar dibuat cairo di CPU, jadi renderer cairo menghindari unggah
+# tekstur selebar layar ke GPU tiap frame (2560x1600, 12 FPS: ~12% vs ~20% satu core
+# dengan vulkan). Bisa ditimpa: GSK_RENDERER=vulkan qamariah-livepaper
+export GSK_RENDERER="${GSK_RENDERER:-cairo}"
 LD_PRELOAD="$LIB${LD_PRELOAD:+:$LD_PRELOAD}" exec python3 /usr/local/share/qamariah-livepaper/livepaper.py "$@"
