@@ -531,6 +531,23 @@ def _frac(x):
     return x - math.floor(x)
 
 
+_SEA_XS = {}
+
+
+def _sea_xs(w, step):
+    """titik x garis gelombang; dijumlah berulang persis seperti loop asli."""
+    key = (w, step)
+    if key not in _SEA_XS:
+        import numpy as np
+        xs = []
+        x = -step
+        while x <= w + step:
+            xs.append(x)
+            x += step
+        _SEA_XS[key] = (xs, np.array(xs))
+    return _SEA_XS[key]
+
+
 def wind_px(wx, w):
     """kecepatan horizontal di layar (px/detik); timur di kiri."""
     toward = math.radians(wx["wind_from"] + 180)
@@ -725,6 +742,7 @@ def draw_sky(ctx, w, h, a, t, cfg, wx=None, h_total=None):
 
 
 def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
+    import numpy as np
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
     dx, dy = drift(t, cfg["drift"])
@@ -741,6 +759,7 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     moon_up = moon_visible(a, cfg)
     lum = 1.0 - a["night"] * (0.38 - 0.25 * (a["illum"] if moon_up else 0))
     lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - (0.3 if wx["fog"] else 0)
+    xs, X = _sea_xs(w, step)
     for i in range(n):
         u = (i + 1) / n                              # 0 = cakrawala, 1 = depan
         y0 = h * (u ** 1.7) * 0.92 + h * 0.02
@@ -750,17 +769,13 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
         ph0 = i * 1.37
         ctx.set_source_rgba(1, 1, 1, (0.16 + 0.50 * u) * lum)
         ctx.set_line_width(0.8 + 1.6 * u)
-        x = -step
-        first = True
-        while x <= w + step:
-            ph = 2 * math.pi * (x - v * t) / lam + ph0
-            y = y0 + amp * (0.65 * math.sin(ph) + 0.35 * math.sin(1.7 * ph + i)
-                            + 0.30 * rough * math.sin(3.3 * ph + 2.1 * t + i))   # riak badai
-            if first:
-                ctx.move_to(x, y); first = False
-            else:
-                ctx.line_to(x, y)
-            x += step
+        ph = 2 * math.pi * (X - v * t) / lam + ph0
+        ys = y0 + amp * (0.65 * np.sin(ph) + 0.35 * np.sin(1.7 * ph + i)
+                         + 0.30 * rough * np.sin(3.3 * ph + 2.1 * t + i))   # riak badai
+        ys = ys.tolist()
+        ctx.move_to(xs[0], ys[0])
+        for x, y in zip(xs[1:], ys[1:]):
+            ctx.line_to(x, y)
         ctx.stroke()
 
     # pantulan berkilau di bawah matahari/bulan
