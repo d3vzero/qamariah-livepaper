@@ -485,7 +485,18 @@ def draw_planets(ctx, w, h, a, cfg, moon_xy, r_moon):
         ctx.fill()
 
 
-def draw_sky_base(ctx, w, h, a, t, cfg):
+def _cloud_veil(wx):
+    """mendung tebal meredupkan bintang/bulan/matahari secara merata."""
+    if not wx:
+        return 0.0
+    cover = wx["cover"]
+    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] > 0 else 0.5)
+    if wx["fog"]:
+        veil = max(veil, 0.6)
+    return veil
+
+
+def draw_sky_base(ctx, w, h, a, t, cfg, wx=None):
     """bagian langit yang berubah lambat: bintang, planet, matahari, bulan."""
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
@@ -510,6 +521,10 @@ def draw_sky_base(ctx, w, h, a, t, cfg):
         toward = math.atan2(sun_xy[1] - moon_xy[1], sun_xy[0] - moon_xy[0])
         draw_moon(ctx, moon_xy[0], moon_xy[1], r_moon, a["phase"], toward)
     ctx.restore()
+    veil = _cloud_veil(wx)                           # ikut cache: hanya berubah bersama wx
+    if veil > 0:
+        ctx.set_source_rgba(0, 0, 0, veil)
+        ctx.paint()
 
 
 def _frac(x):
@@ -607,6 +622,29 @@ def _cloud_sprites(w, h, n, heavy, line_al):
             _cloud_cluster(c, ox + r.choice((-1, 1)) * scale * r.uniform(0.7, 1.3),
                            oy + scale * r.uniform(0.08, 0.2), scale * r.uniform(0.5, 0.75),
                            r, line_al, lw)
+        # potong ke isi sebenarnya (alpha > 0) + margin 2px
+        surf.flush()
+        import numpy as np
+        sh_s = surf.get_height()
+        sw_s = surf.get_width()
+        stride = surf.get_stride()
+        a = np.frombuffer(surf.get_data(), np.uint8).reshape(sh_s, stride)[:, :sw_s*4].reshape(sh_s, sw_s, 4)[:, :, 3]
+        mask = a > 0
+        if mask.any():
+            y0m, y1m = np.where(mask.any(axis=1))[0][[0, -1]]
+            x0m, x1m = np.where(mask.any(axis=0))[0][[0, -1]]
+            x0m = max(0, x0m - 2)
+            x1m = min(sw_s - 1, x1m + 2)
+            y0m = max(0, y0m - 2)
+            y1m = min(sh_s - 1, y1m + 2)
+            new_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, x1m - x0m + 1, y1m - y0m + 1)
+            c2 = cairo.Context(new_surf)
+            c2.set_operator(cairo.OPERATOR_SOURCE)
+            c2.set_source_surface(surf, -x0m, -y0m)
+            c2.paint()
+            surf = new_surf
+            ox -= x0m
+            oy -= y0m
         sprites.append((surf, ox, oy, x0, cy, speed_f, scale))
     if len(_CLOUD_CACHE) > 8:
         _CLOUD_CACHE.clear()
@@ -616,13 +654,6 @@ def _cloud_sprites(w, h, n, heavy, line_al):
 
 def draw_clouds(ctx, w, h, a, wx, t, cfg):
     cover = wx["cover"]
-    # mendung tebal meredupkan bintang/bulan/matahari secara merata
-    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] > 0 else 0.5)
-    if wx["fog"]:
-        veil = max(veil, 0.6)
-    if veil > 0:
-        ctx.set_source_rgba(0, 0, 0, veil)
-        ctx.paint()
     n = round(cover * cfg["clouds_max"])
     if n == 0:
         return
@@ -639,6 +670,18 @@ def draw_clouds(ctx, w, h, a, wx, t, cfg):
         ctx.paint()
 
 
+_RAIN_CACHE = []
+
+
+def _rain_drops(n):
+    """(rx, ry, sp) tiap butir hujan; hanya bergantung pada indeks."""
+    while len(_RAIN_CACHE) < n:
+        i = len(_RAIN_CACHE)
+        rx, ry = _frac(math.sin(i * 12.9898) * 43758.5453), _frac(math.sin(i * 78.233) * 12345.678)
+        _RAIN_CACHE.append((rx, ry, 0.8 + 0.4 * _frac(rx * 7.31)))
+    return _RAIN_CACHE[:n]
+
+
 def draw_rain(ctx, w, y0, y1, h_total, wx, t):
     """garis hujan dalam koordinat layar global [y0, y1) digambar relatif ke y0."""
     n = int(wx["rain"] * 380)
@@ -650,9 +693,7 @@ def draw_rain(ctx, w, y0, y1, h_total, wx, t):
     sx = vx / vy * length
     ctx.set_line_width(1.2)
     ctx.set_source_rgba(1, 1, 1, 0.10 + 0.14 * wx["rain"])
-    for i in range(n):
-        rx, ry = _frac(math.sin(i * 12.9898) * 43758.5453), _frac(math.sin(i * 78.233) * 12345.678)
-        sp = 0.8 + 0.4 * _frac(rx * 7.31)
+    for rx, ry, sp in _rain_drops(n):
         y = (ry * h_total + vy * sp * t) % h_total
         if y < y0 - length or y >= y1:
             continue
@@ -678,7 +719,7 @@ def draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total):
 
 
 def draw_sky(ctx, w, h, a, t, cfg, wx=None, h_total=None):
-    draw_sky_base(ctx, w, h, a, t, cfg)
+    draw_sky_base(ctx, w, h, a, t, cfg, wx)
     if wx:
         draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total or h)
 
@@ -859,7 +900,7 @@ def run():
             key = (w, h, state["gen"])
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
                 surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg)
+                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"])
                 cache["surf"], cache["key"] = surf, key
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
