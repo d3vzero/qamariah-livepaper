@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aro-livepaper — live wallpaper OLED untuk aro (layer-shell background).
+"""qamariah-livepaper — live wallpaper OLED untuk aro (layer-shell background).
 
 Langit hitam pekat dengan posisi benda langit SEBENARNYA untuk lokasi & waktu:
   - matahari & bulan: altitude/azimuth dihitung (bulan: rumus Meeus ringkas,
@@ -24,11 +24,11 @@ Hemat OLED: >95% piksel hitam, seluruh gambar bergeser beberapa piksel per jam
 dan berhenti sendiri saat tertutup window.
 
 Pakai:
-  aro-livepaper                         jalankan (dari `exec =` di config aro)
-  aro-livepaper --preview out.png       render satu gambar (tanpa GTK)
+  qamariah-livepaper                    jalankan (dari `exec =` di config aro)
+  qamariah-livepaper --preview out.png  render satu gambar (tanpa GTK)
       [--size 2560x1600] [--time "2026-10-20 19:30"]
       [--weather clear|cloudy|rain|storm|fog|sim|live]
-Config: ~/.config/aro-livepaper/config.ini (lihat config.example.ini)
+Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
 import math
@@ -63,8 +63,13 @@ DEFAULTS = {
 def load_config():
     cp = configparser.ConfigParser()
     cp.read_dict({"livepaper": DEFAULTS})
-    path = os.path.expanduser(
-        os.environ.get("XDG_CONFIG_HOME", "~/.config") + "/aro-livepaper/config.ini")
+    base = os.path.expanduser(os.environ.get("XDG_CONFIG_HOME", "~/.config"))
+    path = os.path.join(base, "qamariah-livepaper", "config.ini")
+    old = os.path.join(base, "aro-livepaper", "config.ini")
+    if not os.path.exists(path) and os.path.exists(old):
+        print("qamariah-livepaper: memakai config lama %s (pindahkan ke %s)" % (old, path),
+              file=sys.stderr)
+        path = old
     cp.read(path)
     c = cp["livepaper"]
     return {
@@ -314,7 +319,7 @@ class Weather:
         self.mode = cfg["weather"]
         self.live = None
         self.next_try = 0
-        self.cache = os.path.expanduser("~/.cache/aro-livepaper/weather.json")
+        self.cache = os.path.expanduser("~/.cache/qamariah-livepaper/weather.json")
 
     def _fetch(self):
         import json
@@ -324,7 +329,7 @@ class Weather:
                "&current=cloud_cover,precipitation,weather_code,wind_speed_10m,"
                "wind_direction_10m&timezone=auto" % (lat, lon))
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "aro-livepaper"})
+            req = urllib.request.Request(url, headers={"User-Agent": "qamariah-livepaper"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 data = json.load(r)
             self.live = (time.time(), weather_from_api(data["current"]))
@@ -333,7 +338,7 @@ class Weather:
                 json.dump({"t": self.live[0], "w": self.live[1]}, f)
             self.next_try = time.time() + self.cfg["weather_refresh"] * 60
         except Exception as e:                       # offline / API gagal → coba lagi 5 menit
-            print("aro-livepaper: cuaca live gagal:", e, file=sys.stderr)
+            print("qamariah-livepaper: cuaca live gagal:", e, file=sys.stderr)
             self.next_try = time.time() + 300
 
     def poll(self, background=True):
@@ -833,7 +838,7 @@ def run():
     def make_window(app, monitor):
         win = Gtk.ApplicationWindow(application=app)
         Layer.init_for_window(win)
-        Layer.set_namespace(win, "aro-livepaper")
+        Layer.set_namespace(win, "qamariah-livepaper")
         Layer.set_layer(win, Layer.Layer.BACKGROUND)
         Layer.set_monitor(win, monitor)
         for edge in (Layer.Edge.TOP, Layer.Edge.BOTTOM, Layer.Edge.LEFT, Layer.Edge.RIGHT):
