@@ -34,6 +34,7 @@ Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 import configparser
 import math
 import os
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -504,7 +505,7 @@ def _cloud_veil(wx):
     return veil
 
 
-def draw_sky_base(ctx, w, h, a, t, cfg, wx=None, h_total=None):
+def draw_sky_base(ctx, w, h, a, t, cfg, wx=None):
     """bagian langit yang berubah lambat: bintang, planet, matahari, bulan."""
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
@@ -533,10 +534,6 @@ def draw_sky_base(ctx, w, h, a, t, cfg, wx=None, h_total=None):
     if veil > 0:
         ctx.set_source_rgba(0, 0, 0, veil)
         ctx.paint()
-    sky_part = SCENES[cfg.get("scene", "sea")][0]
-    if sky_part:
-        sky_part(ctx, w, h, a, t, cfg, wx or WEATHER_FIXED["clear"],
-                 h_total or round(h / cfg["horizon"]))
 
 
 def _frac(x):
@@ -748,7 +745,7 @@ def draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total):
 
 
 def draw_sky(ctx, w, h, a, t, cfg, wx=None, h_total=None):
-    draw_sky_base(ctx, w, h, a, t, cfg, wx, h_total)
+    draw_sky_base(ctx, w, h, a, t, cfg, wx)
     if wx:
         draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total or h)
 
@@ -829,396 +826,402 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     draw_lightning(ctx, wx, t, cfg)
 
 
-_VALLEY_LAYOUT = {}
+# ── scene valley: lukisan tinta ────────────────────────────────────────────
+# Scene valley (gaya lukisan tinta / shan shui, dibalik untuk layar hitam).
+#
+# Bukit dan batu berupa isian abu-abu bergradasi yang memudar ke kabut di kaki-
+# nya, danau kosong di bawah cakrawala (hanya pantulan matahari dan bulan),
+# pohon dedalu dan rumpun bambu yang bergoyang tertiup angin, gerombolan
+# burung saat cerah, awan berupa sapuan kuas tinta yang lembut, dan kabut yang
+# melayang di atas danau (tebal malam hari, tipis siang hari).
+# Koordinat = pecahan layar penuh (W x H), (0,0) kiri atas.
+#
+# Urutan gambar per frame:
+#   1. langit (cache) -> 2. ink_clouds() -> 3. valley_static() (cache, bukit
+#   menutupi awan & bintang) -> 4. valley_anim() (pantulan, kabut danau, pohon,
+#   burung) -> 5. hujan
+#   VALLEY_HORIZON = garis danau (batas langit untuk project()).
+VALLEY_HORIZON = 0.70
+
+# bukit tengah (samar, memudar ke kabut): garis atas sebagai pecahan (x, y)
+V_MID_LEFT = [(0.00, 0.47), (0.04, 0.43), (0.08, 0.41), (0.12, 0.43), (0.16, 0.40),
+              (0.20, 0.35), (0.235, 0.31), (0.26, 0.30), (0.285, 0.33), (0.30, 0.38),
+              (0.33, 0.45), (0.37, 0.52), (0.40, 0.58), (0.43, 0.655), (0.455, 0.70)]
+V_MID_LEFT2 = [(0.12, 0.56), (0.16, 0.52), (0.20, 0.50), (0.24, 0.53), (0.28, 0.58),
+               (0.32, 0.62), (0.36, 0.665), (0.40, 0.70)]
+V_MID_RIGHT = [(0.635, 0.70), (0.665, 0.65), (0.70, 0.58), (0.74, 0.52), (0.77, 0.47), (0.80, 0.445),
+               (0.83, 0.46), (0.86, 0.50), (0.90, 0.53), (0.94, 0.55), (1.00, 0.57)]
+V_PILLAR = [(0.575, 0.70), (0.585, 0.66), (0.588, 0.55), (0.595, 0.47), (0.607, 0.425), (0.622, 0.41),
+            (0.636, 0.43), (0.645, 0.48), (0.652, 0.56), (0.656, 0.66), (0.665, 0.70)]
+# batu depan (lebih terang = lebih dekat), menyentuh danau
+V_FRONT_LEFT = [(0.00, 0.50), (0.04, 0.53), (0.08, 0.57), (0.12, 0.585), (0.16, 0.565),
+                (0.20, 0.555), (0.23, 0.58), (0.27, 0.615), (0.31, 0.635), (0.36, 0.655),
+                (0.42, 0.675), (0.48, 0.69), (0.52, 0.70)]
+V_FRONT_ISLAND = [(0.615, 0.70), (0.618, 0.655), (0.63, 0.615), (0.66, 0.595),
+                  (0.70, 0.60), (0.73, 0.63), (0.745, 0.665), (0.76, 0.70)]
+V_FRONT_RIGHT = [(0.74, 0.70), (0.78, 0.665), (0.83, 0.645), (0.88, 0.65), (0.93, 0.635),
+                 (0.97, 0.645), (1.00, 0.655)]
+V_SMALL_ROCK = [(0.44, 0.70), (0.455, 0.675), (0.475, 0.665), (0.495, 0.672), (0.51, 0.70)]
+
+# pohon: (jenis, x, y akar, tinggi relatif)
+V_TREES = [("willow", 0.685, 0.598, 1.00),
+           ("willow", 0.478, 0.667, 0.62),
+           ("bamboo", 0.075, 0.565, 1.00),
+           ("bamboo", 0.865, 0.648, 0.70)]
+
+_V_GEO = {}
 
 
-def _lerp_pts(ctrl, step, jit, rng):
-    """titik rapat di sepanjang garis kontrol; titik tengah digeser acak ±jit (y)."""
-    out = []
-    for p, q in zip(ctrl, ctrl[1:]):
-        dx = q[0] - p[0]
-        dy = q[1] - p[1]
-        n = max(1, math.ceil(math.sqrt(dx * dx + dy * dy) / step))
-        for k in range(n):
-            out.append((p[0] + dx * k / n, p[1] + dy * k / n))
-    out.append(ctrl[-1])
-    for i in range(1, len(out) - 1):
-        out[i] = (out[i][0], out[i][1] + rng.uniform(-jit, jit))
+def _v_rough(poly, rng, amp, n=5):
+    out = [poly[0]]
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:]):
+        for k in range(1, n + 1):
+            f = k / n
+            jit = 0 if k == n else rng.uniform(-amp, amp)
+            out.append((x0 + (x1 - x0) * f, y0 + (y1 - y0) * f + jit))
     return out
 
 
-def _interp_y(pts, x):
-    x0 = pts[0][0]
-    x1 = pts[-1][0]
-    lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
-    if x <= lo:
-        return pts[0][1] if x0 <= x1 else pts[-1][1]
-    if x >= hi:
-        return pts[-1][1] if x0 <= x1 else pts[0][1]
+def _v_smooth(ctx, pts):
+    ctx.move_to(*pts[0])
     for i in range(len(pts) - 1):
-        x0i, y0i = pts[i]
-        x1i, y1i = pts[i + 1]
-        if abs(x1i - x0i) < 1e-12:
-            continue
-        a, b = (x0i, x1i) if x0i <= x1i else (x1i, x0i)
-        if (x - a) * (x - b) <= 0:
-            t = (x - x0i) / (x1i - x0i)
-            return y0i + t * (y1i - y0i)
-    return pts[-1][1]
+        p0 = pts[i - 1] if i > 0 else pts[i]
+        p1, p2 = pts[i], pts[i + 1]
+        p3 = pts[i + 2] if i + 2 < len(pts) else p2
+        ctx.curve_to(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6,
+                     p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, *p2)
 
 
-def _interp_x(pts, y):
-    y0 = pts[0][1]
-    y1 = pts[-1][1]
-    lo, hi = (y0, y1) if y0 <= y1 else (y1, y0)
-    if y <= lo:
-        return pts[0][0] if y0 <= y1 else pts[-1][0]
-    if y >= hi:
-        return pts[-1][0] if y0 <= y1 else pts[0][0]
-    for i in range(len(pts) - 1):
-        x0i, yi = pts[i][0], pts[i][1]
-        x1i, y1i = pts[i + 1][0], pts[i + 1][1]
-        if abs(y1i - yi) < 1e-12:
-            continue
-        a, b = (yi, y1i) if yi <= y1i else (y1i, yi)
-        if (y - a) * (y - b) <= 0:
-            t = (y - yi) / (y1i - yi)
-            return x0i + t * (x1i - x0i)
-    return pts[-1][0]
+def _v_interp(poly, x):
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:]):
+        if x0 <= x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0 or 1)
+    return None
 
 
-def _valley_layout(w, H, Y):
-    """tata letak lembah (seed tetap) dalam koordinat layar global; Y = cakrawala."""
-    import random
-    rng = random.Random(20261021)
-    key = (w, H, Y)
-    if key in _VALLEY_LAYOUT:
-        return _VALLEY_LAYOUT[key]
-    G = H - Y
-
-    # left cliff
-    l_ridge = _lerp_pts([(-0.01 * w, 0.38 * Y), (0.20 * w, 0.55 * Y), (0.41 * w, Y - 0.05 * H)],
-                        0.012 * w, 0.006 * H, rng)
-    l_face = _lerp_pts([(0.41 * w, Y - 0.05 * H), (0.425 * w, Y - 0.01 * H), (0.43 * w, Y + 0.02 * G)],
-                       0.01 * H, 0, rng)
-    for i in range(1, len(l_face) - 1):
-        l_face[i] = (l_face[i][0] + rng.uniform(-0.004 * w, 0.004 * w), l_face[i][1])
-    l_base = _lerp_pts([(0.43 * w, Y + 0.02 * G), (0.30 * w, Y + 0.35 * G), (0.10 * w, H + 4)],
-                       0.02 * w, 0.004 * H, rng)
-    left = l_ridge + l_face[1:] + l_base[1:]
-
-    # right cliff
-    r_ridge = _lerp_pts([(1.01 * w, 0.30 * Y), (0.80 * w, 0.50 * Y), (0.59 * w, Y - 0.06 * H)],
-                        0.012 * w, 0.006 * H, rng)
-    r_face = _lerp_pts([(0.59 * w, Y - 0.06 * H), (0.575 * w, Y - 0.01 * H), (0.57 * w, Y + 0.02 * G)],
-                       0.01 * H, 0, rng)
-    for i in range(1, len(r_face) - 1):
-        r_face[i] = (r_face[i][0] + rng.uniform(-0.004 * w, 0.004 * w), r_face[i][1])
-    r_base = _lerp_pts([(0.57 * w, Y + 0.02 * G), (0.70 * w, Y + 0.35 * G), (0.90 * w, H + 4)],
-                       0.02 * w, 0.004 * H, rng)
-    right = r_ridge + r_face[1:] + r_base[1:]
-
-    # mountain
-    mountain = _lerp_pts(
-        [(0.33 * w, Y), (0.39 * w, Y - 0.05 * H), (0.42 * w, Y - 0.08 * H), (0.455 * w, Y - 0.06 * H),
-         (0.50 * w, Y - 0.13 * H), (0.545 * w, Y - 0.07 * H), (0.58 * w, Y - 0.095 * H),
-         (0.62 * w, Y - 0.04 * H), (0.67 * w, Y)],
-        0.006 * w, 0.004 * H, rng)
-
-    # snow
-    snowline = Y - 0.065 * H
-    snow = []
-    for x, y in mountain:
-        if y < snowline:
-            snow.append(((x, y),
-                         (x + rng.uniform(-0.002 * w, 0.002 * w),
-                          y + rng.uniform(0.3, 0.9) * (snowline - y))))
-
-    # trees
-    trees = []
-    for ridge in [l_ridge, r_ridge]:
-        x0 = ridge[0][0]
-        x1 = ridge[-1][0]
-        x = x0
-        while (x < x1) if x0 < x1 else (x > x1):
-            u = (x - x0) / (x1 - x0) if x1 != x0 else 0
-            y = _interp_y(ridge, x)
-            s = 0.014 * H * (1 - 0.6 * u) * rng.uniform(0.6, 1.2)
-            trees.append((x, y, s))
-            x += math.copysign(w * rng.uniform(0.006, 0.014) * (1 - 0.5 * u), x1 - x0)
-
-    # river
-    river_l, river_r, river_c = [], [], []
-    for k in range(81):
-        v = k / 80
-        y = Y + 0.01 * G + v ** 1.5 * 0.99 * G
-        xc = 0.5 * w + 0.10 * w * v * math.sin(v * 3.2 * math.pi + 0.6)
-        hw = 0.003 * w + 0.05 * w * v ** 1.4
-        river_l.append((xc - hw, y))
-        river_r.append((xc + hw, y))
-        river_c.append((xc, y, hw))
-
-    # floor
-    floor = []
-    for i in range(1, 7):
-        v = (i / 7) ** 1.6
-        y = Y + v * G
-        floor.append(((0.0, y), (w, y)))
-
-    # fall
-    xf = 0.70 * w
-    y_top = Y + 0.02 * G
-    y_bot = _interp_y(r_base, xf)
-
-    # lights
-    lights = []
-    for _ in range(40):
-        v = rng.uniform(0.08, 0.6)
-        idx = round(v * 80)
-        xc, y, hw = river_c[idx]
-        side = rng.choice((-1, 1))
-        lx = xc + side * (hw + rng.uniform(0.01, 0.07) * w)
-        sz = rng.uniform(0.8, 1.6) * (1 + v)
-        if _interp_x(l_base, y) + 0.01 * w < lx < _interp_x(r_base, y) - 0.01 * w:
-            lights.append((lx, y + rng.uniform(-0.01, 0.01) * G, sz))
-
-    # glints
-    glints = []
-    for _ in range(16):
-        v = rng.uniform(0.05, 0.95)
-        idx = round(v * 80)
-        xc, y, hw = river_c[idx]
-        glints.append((xc + rng.uniform(-0.5, 0.5) * hw, y, 0.25 * hw + 2,
-                       rng.uniform(0, 2 * math.pi)))
-
-    result = {
-        "left": left,
-        "right": right,
-        "left_ridge": l_ridge,
-        "right_ridge": r_ridge,
-        "left_base": l_base,
-        "right_base": r_base,
-        "mountain": mountain,
-        "snow": snow,
-        "trees": trees,
-        "river": (river_l, river_r),
-        "river_c": river_c,
-        "floor": floor,
-        "fall": (xf, y_top, y_bot),
-        "lights": lights,
-        "glints": glints,
-    }
-    _VALLEY_LAYOUT[key] = result
-    return result
+def _v_geometry(W, H, seed=11):
+    key = (W, H, seed)
+    if key in _V_GEO:
+        return _V_GEO[key]
+    rng = random.Random(seed)
+    P = lambda poly, amp=0.004, n=5: [(x * W, y * H) for x, y in _v_rough(poly, rng, amp, n)]
+    g = {"mid": [(P(V_MID_LEFT, 0.006), 0.20), (P(V_MID_RIGHT, 0.006), 0.18),
+                 (P(V_PILLAR, 0.003, 4), 0.24), (P(V_MID_LEFT2, 0.005), 0.26)],
+         "front": [(P(V_FRONT_LEFT, 0.005), 0.34), (P(V_FRONT_ISLAND, 0.004, 4), 0.38),
+                   (P(V_FRONT_RIGHT, 0.004), 0.30), (P(V_SMALL_ROCK, 0.003, 3), 0.32)]}
+    # sapuan kuas kering di batu depan: garis hitam pendek miring (tekstur tinta)
+    g["texture"] = []
+    for poly, _ in g["front"]:
+        xs = [p[0] for p in poly]
+        for _ in range(int(len(poly) * 4 * W / 2560)):
+            x = rng.uniform(min(xs), max(xs))
+            top = _v_interp([(p[0] / W, p[1] / H) for p in poly], x / W)
+            if top is None:
+                continue
+            y = rng.uniform(top + 0.008, VALLEY_HORIZON - 0.004) * H
+            ln = rng.uniform(8, 30) * W / 2560
+            ang = rng.uniform(-0.9, -0.2)
+            g["texture"].append((x, y, ln, ang, rng.uniform(0.5, 1.0)))
+    # burung: 2 gerombolan, posisi relatif tiap burung
+    g["flocks"] = []
+    for fx, fy, n in ((0.22, 0.12, 26), (0.70, 0.20, 18)):
+        birds = [(rng.gauss(0, 0.06), rng.gauss(0, 0.03), rng.uniform(0, 6.3),
+                  rng.uniform(0.6, 1.0)) for _ in range(n)]
+        g["flocks"].append((fx, fy, birds, rng.uniform(0.002, 0.004)))
+    # pohon: helai dedalu / batang dan daun bambu
+    g["trees"] = []
+    for kind, x, y, k in V_TREES:
+        if kind == "willow":
+            strands = [(rng.uniform(-1, 1), rng.uniform(0.6, 1.0), rng.uniform(0, 6.3))
+                       for _ in range(int(80 * k) + 16)]
+            g["trees"].append((kind, x * W, y * H, k, strands))
+        else:
+            stalks = []
+            for i in range(int(6 * k) + 2):
+                dx = rng.uniform(-0.012, 0.012) * W
+                hgt = rng.uniform(0.10, 0.17) * H * k
+                lean = rng.uniform(-0.12, 0.12)
+                leaves = [(rng.uniform(0.35, 1.0), rng.choice((-1, 1)), rng.uniform(0.6, 1.0),
+                           rng.uniform(0, 6.3)) for _ in range(9)]
+                stalks.append((dx, hgt, lean, leaves))
+            g["trees"].append((kind, x * W, y * H, k, stalks))
+    _V_GEO[key] = g
+    return g
 
 
-_VALLEY_GROUND = {"key": None, "surf": None}
-
-
-def _valley_static(ctx, L, w, H, Y, lum):
-    """bagian diam lembah dalam koordinat layar global (Y = cakrawala, H = tinggi layar)."""
+def _v_fill_hill(ctx, pts, H, a_top, lum, fade_to):
+    """isi bukit: hitam pekat (menutupi langit), lalu gradasi abu-abu yang
+    memudar ke bawah (kabut di kaki bukit)."""
     import cairo
-    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-    G = H - Y
-
-    # a. Floor lines
-    for (x0, y), (x1, y) in L["floor"]:
-        v = (y - Y) / G
-        xl = _interp_x(L["river"][0], y)
-        xr = _interp_x(L["river"][1], y)
-        al = (0.10 + 0.12 * v) * lum
-        ctx.set_source_rgba(1, 1, 1, al)
-        ctx.set_line_width(1)
-        ctx.move_to(0, y)
-        ctx.line_to(xl - 0.01 * w, y)
-        ctx.stroke()
-        ctx.set_source_rgba(1, 1, 1, al)
-        ctx.set_line_width(1)
-        ctx.move_to(xr + 0.01 * w, y)
-        ctx.line_to(w, y)
-        ctx.stroke()
-
-    # b. River edges
-    ctx.set_source_rgba(1, 1, 1, 0.40 * lum)
-    ctx.set_line_width(1.2)
-    for edge in L["river"]:
-        ctx.move_to(edge[0][0], edge[0][1])
-        for px, py in edge[1:]:
-            ctx.line_to(px, py)
-        ctx.stroke()
-
-    # c. Mountain
-    pts = L["mountain"]
-    ctx.move_to(pts[0][0], pts[0][1])
-    for px, py in pts[1:]:
-        ctx.line_to(px, py)
-    ctx.line_to(pts[-1][0], Y + 2)
-    ctx.line_to(pts[0][0], Y + 2)
-    ctx.close_path()
-    ctx.set_source_rgb(0, 0, 0)
-    ctx.fill()
-    ctx.move_to(pts[0][0], pts[0][1])
-    for px, py in pts[1:]:
-        ctx.line_to(px, py)
-    ctx.set_source_rgba(1, 1, 1, 0.55 * lum)
-    ctx.set_line_width(1.5)
-    ctx.stroke()
-
-    # d. Snow
-    ctx.set_source_rgba(1, 1, 1, 0.35 * lum)
-    ctx.set_line_width(1)
-    for (x0, y0), (x1, y1) in L["snow"]:
-        ctx.move_to(x0, y0)
-        ctx.line_to(x1, y1)
-    ctx.stroke()
-
-    # e. Cliffs
-    for (pts, outer_x), ridge in (
-        ((L["left"], -10), L["left_ridge"]),
-        ((L["right"], w + 10), L["right_ridge"]),
-    ):
-        # polygon path
-        ctx.move_to(pts[0][0], pts[0][1])
-        for px, py in pts[1:]:
-            ctx.line_to(px, py)
-        ctx.line_to(outer_x, H + 4)
-        ctx.line_to(outer_x, pts[0][1])
-        ctx.close_path()
-        ctx.set_source_rgb(0, 0, 0)
-        ctx.fill()
-
-        # texture layers (clip)
-        ctx.save()
-        ctx.move_to(pts[0][0], pts[0][1])
-        for px, py in pts[1:]:
-            ctx.line_to(px, py)
-        ctx.line_to(outer_x, H + 4)
-        ctx.line_to(outer_x, pts[0][1])
-        ctx.close_path()
-        ctx.clip()
-        ctx.set_source_rgba(1, 1, 1, 0.14 * lum)
-        ctx.set_line_width(1)
-        for k in range(1, 6):                        # lapisan batu sejajar punggung tebing
-            off = k * 0.06 * H
-            ctx.move_to(ridge[0][0], ridge[0][1] + off)
-            for px, py in ridge[1:]:
-                ctx.line_to(px, py + off)
-            ctx.set_dash([0.02 * w, 0.012 * w], k * 37)
-            ctx.stroke()
-        ctx.restore()
-
-        # cliff edge
-        ctx.set_source_rgba(1, 1, 1, 0.6 * lum)
-        ctx.set_line_width(1.6)
-        ctx.move_to(pts[0][0], pts[0][1])
-        for px, py in pts[1:]:
-            ctx.line_to(px, py)
-        ctx.stroke()
-
-    # f. Trees
-    ctx.set_source_rgba(1, 1, 1, 0.45 * lum)
-    ctx.set_line_width(1)
-    for (x, y, s) in L["trees"]:
-        ctx.move_to(x, y)
-        ctx.line_to(x, y - s)
-        ctx.move_to(x - 0.3 * s, y - 0.35 * s)
-        ctx.line_to(x, y - s)
-        ctx.line_to(x + 0.3 * s, y - 0.35 * s)
+    base = VALLEY_HORIZON * H
+    _v_smooth(ctx, pts)
+    W = ctx.get_target().get_width()
+    x0 = pts[0][0] - (12 if pts[0][0] <= 0 else 0)      # tepi layar: perpanjang keluar
+    x1 = pts[-1][0] + (12 if pts[-1][0] >= W else 0)    # supaya geser anti burn-in tidak bercelah
+    ctx.line_to(x1, pts[-1][1]); ctx.line_to(x1, base)
+    ctx.line_to(x0, base); ctx.line_to(x0, pts[0][1]); ctx.close_path()
+    path = ctx.copy_path()
+    ctx.set_source_rgb(0, 0, 0); ctx.fill()
+    top = min(p[1] for p in pts)
+    gr = cairo.LinearGradient(0, top, 0, base)
+    gr.add_color_stop_rgba(0.0, 1, 1, 1, a_top * lum)
+    gr.add_color_stop_rgba(0.55, 1, 1, 1, a_top * lum * 0.55)
+    gr.add_color_stop_rgba(1.0, 1, 1, 1, a_top * lum * fade_to)
+    ctx.new_path(); ctx.append_path(path)
+    ctx.set_source(gr); ctx.fill()
+    # garis tepi tipis: seperti goresan tinta di punggung bukit
+    _v_smooth(ctx, pts)
+    ctx.set_source_rgba(1, 1, 1, min(1.0, a_top * 2.2) * lum)
+    ctx.set_line_width(1.2 * ctx.get_target().get_width() / 2560)
     ctx.stroke()
 
 
-def _valley_anim(ctx, L, w, H, Y, a, t, lum):
-    """animasi per-frame lembah: air terjun, kilau sungai, lampu desa."""
-    xf, y_top, y_bot = L["fall"]
-    total_dash = 0.012 * H + 0.008 * H
-    for k in (-1, 0, 1):
-        x = xf + k * 0.0025 * w
-        ctx.set_dash([0.012 * H, 0.008 * H],
-                     -(t * 0.10 * H + k * 0.007 * H) % total_dash)
-        ctx.set_source_rgba(1, 1, 1, 0.5 * lum)
-        ctx.set_line_width(1.2)
-        ctx.move_to(x, y_top)
-        ctx.line_to(x, y_bot)
-        ctx.stroke()
-    ctx.set_dash([])
-
-    for j in range(4):
-        ph = t * 3.1 + j * 1.9
-        al = 0.30 * lum * (0.5 + 0.5 * math.sin(ph))
-        x0 = xf - 0.006 * w + j * 0.004 * w
-        y0 = y_bot - 2
-        x1 = xf - 0.008 * w + j * 0.0053 * w
-        y1 = y_bot - 2 - 0.006 * H * (0.6 + 0.4 * math.sin(ph * 1.3))
-        ctx.set_source_rgba(1, 1, 1, al)
-        ctx.set_line_width(1)
-        ctx.move_to(x0, y0)
-        ctx.line_to(x1, y1)
-        ctx.stroke()
-
-    for (x, y, half, ph) in L["glints"]:
-        al = 0.28 * lum * max(0.0, math.sin(t * 1.1 + ph)) ** 2
-        if al < 0.02:
-            continue
-        ctx.set_source_rgba(1, 1, 1, al)
-        ctx.set_line_width(1.2)
-        ctx.move_to(x - half, y)
-        ctx.line_to(x + half, y)
-        ctx.stroke()
-
-    if a["night"] > 0:
-        for i, (x, y, size) in enumerate(L["lights"]):
-            al = a["night"] * (0.55 + 0.15 * math.sin(t * 0.7 + i * 1.9))
-            ctx.set_source_rgba(1, 1, 1, al)
-            ctx.arc(x, y, size / 2 + 0.5, 0, 2 * math.pi)
-            ctx.fill()
-
-
-def draw_valley_sky(ctx, w, h, a, t, cfg, wx, h_total):
-    """bagian lembah yang menjulang di atas cakrawala (tebing, gunung); ikut cache langit."""
-    lum = round(scene_lum(a, cfg, wx), 3)
-    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
-    ctx.save()
-    ctx.translate(dx, dy)
-    _valley_static(ctx, _valley_layout(w, h_total, h), w, h_total, h, lum)
-    ctx.restore()
-
-
-def draw_valley(ctx, w, h, a, t, cfg, h_sky, wx=None):
-    """lembah di bawah cakrawala."""
+def valley_static(ctx, W, H, lum=1.0):
+    g = _v_geometry(W, H)
+    s = W / 2560
+    ctx.set_line_cap(1); ctx.set_line_join(1)
+    for pts, a in g["mid"]:
+        _v_fill_hill(ctx, pts, H, a, lum, 0.0)          # bukit tengah: hilang dalam kabut
+    for pts, a in g["front"]:
+        _v_fill_hill(ctx, pts, H, a, lum, 0.35)         # batu depan: tetap terlihat
+    # tekstur kuas kering: goresan hitam di atas batu terang
+    for x, y, ln, ang, k in g["texture"]:
+        ctx.move_to(x, y); ctx.line_to(x + ln * math.cos(ang), y + ln * math.sin(ang))
+        ctx.set_source_rgba(0, 0, 0, 0.55 * k); ctx.set_line_width(2.2 * s * k); ctx.stroke()
+    # kabut tipis di garis danau
     import cairo
-    wx = wx or WEATHER_FIXED["clear"]
-    lum = round(scene_lum(a, cfg, wx), 3)
-    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
-    key = (w, h, h_sky, lum, dx, dy)
-    if _VALLEY_GROUND["key"] != key:
-        surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-        c = cairo.Context(surf)
-        c.set_source_rgb(0, 0, 0)
-        c.paint()
-        c.translate(dx, dy - h_sky)
-        _valley_static(c, _valley_layout(w, h_sky + h, h_sky), w, h_sky + h, h_sky, lum)
-        _VALLEY_GROUND["key"], _VALLEY_GROUND["surf"] = key, surf
-    ctx.set_source_surface(_VALLEY_GROUND["surf"], 0, 0)
-    ctx.paint()
-    ctx.save()
-    ctx.translate(dx, dy - h_sky)
-    _valley_anim(ctx, _valley_layout(w, h_sky + h, h_sky), w, h_sky + h, h_sky, a, t, lum)
-    ctx.restore()
-    draw_rain(ctx, w, h_sky, h_sky + h, h_sky + h, wx, t)
-    draw_lightning(ctx, wx, t, cfg)
+    yb = VALLEY_HORIZON * H
+    gr = cairo.LinearGradient(0, yb - 0.035 * H, 0, yb + 0.02 * H)
+    gr.add_color_stop_rgba(0, 1, 1, 1, 0)
+    gr.add_color_stop_rgba(0.65, 1, 1, 1, 0.10 * lum)
+    gr.add_color_stop_rgba(1, 1, 1, 1, 0)
+    ctx.rectangle(0, yb - 0.035 * H, W, 0.055 * H); ctx.set_source(gr); ctx.fill()
+    # danau: kosong, hitam (pantulan matahari/bulan digambar di valley_anim)
+    ctx.rectangle(0, yb + 0.02 * H, W, H); ctx.set_source_rgb(0, 0, 0); ctx.fill()
 
 
-# scene: (bagian di atas cakrawala yang ikut cache langit, bagian di bawah cakrawala)
+def _v_willow(ctx, x, y, k, strands, t, wind, s, lum):
+    """dedalu: batang miring bercabang, tajuk melengkung, helai menjuntai panjang
+    yang ujungnya diayun angin (makin ke ujung makin jauh)."""
+    hgt = 165 * s * k
+    R = 78 * s * k                                   # setengah lebar tajuk
+    top = y - hgt
+    ctx.move_to(x, y)
+    ctx.curve_to(x - 8 * s * k, y - hgt * 0.35, x + 10 * s * k, y - hgt * 0.65, x + 2 * s * k, top + 10 * s * k)
+    ctx.set_source_rgba(1, 1, 1, 0.8 * lum); ctx.set_line_width(4.0 * s * k); ctx.stroke()
+    for sgn, f in ((-1, 0.55), (1, 0.68), (-1, 0.80), (1, 0.88)):   # cabang ke tajuk
+        bx, by = x + 2 * s * k, y - hgt * f
+        ctx.move_to(bx, by)
+        ctx.curve_to(bx + sgn * R * 0.3, by - hgt * 0.10, bx + sgn * R * 0.6, by - hgt * 0.14,
+                     bx + sgn * R * (0.75 + 0.2 * f), by - hgt * 0.10)
+    ctx.set_source_rgba(1, 1, 1, 0.6 * lum); ctx.set_line_width(2.0 * s * k); ctx.stroke()
+    amp = (3 + 22 * min(1.0, wind / 30.0)) * s * k
+    for u, ln, ph in strands:
+        sx = x + u * R * 1.05
+        sy = top + (u * u) * hgt * 0.22 + 6 * s * k     # tajuk melengkung (tinggi di tengah)
+        L = hgt * (0.55 + 0.45 * abs(u)) * ln           # helai pinggir lebih panjang
+        sw = amp * math.sin(t * (0.8 + 0.25 * ln) + ph) + amp * 0.5
+        ctx.move_to(sx, sy)
+        ctx.curve_to(sx + u * R * 0.18, sy - 4 * s * k,
+                     sx + u * R * 0.30 + sw * 0.25, sy + L * 0.35,
+                     sx + u * R * 0.28 + sw, sy + L)
+    ctx.set_source_rgba(1, 1, 1, 0.40 * lum); ctx.set_line_width(1.0 * s); ctx.stroke()
+
+
+def _v_bamboo(ctx, x, y, k, stalks, t, wind, s, lum):
+    sway = (0.01 + 0.06 * min(1.0, wind / 30.0))
+    for dx, hgt, lean, leaves in stalks:
+        bend = lean + sway * math.sin(t * 0.8 + dx * 0.05)
+        x0, y0 = x + dx, y
+        x1, y1 = x0 + bend * hgt, y0 - hgt
+        ctx.move_to(x0, y0); ctx.curve_to(x0, y0 - hgt * 0.4, x0 + bend * hgt * 0.5, y0 - hgt * 0.75, x1, y1)
+        ctx.set_source_rgba(1, 1, 1, 0.55 * lum); ctx.set_line_width(2.4 * s); ctx.stroke()
+        for f in (0.22, 0.42, 0.6, 0.76):            # ruas
+            nx = x0 + bend * hgt * f * f; ny = y0 - hgt * f
+            ctx.move_to(nx - 3 * s, ny); ctx.line_to(nx + 3 * s, ny)
+        ctx.set_source_rgba(1, 1, 1, 0.55 * lum); ctx.set_line_width(1.2 * s); ctx.stroke()
+        for f, side, lk, ph in leaves:                # daun lancip, bergoyang
+            px = x0 + bend * hgt * f * f; py = y0 - hgt * f
+            ang = (-0.35 if side > 0 else math.pi + 0.35) + 0.25 * math.sin(t * 1.6 + ph) * (0.4 + wind / 30)
+            ln = 34 * s * lk * k
+            tx, ty = px + math.cos(ang) * ln, py + math.sin(ang) * ln * 0.55 + ln * 0.25
+            nx_, ny_ = -(ty - py), (tx - px)
+            nrm = math.hypot(nx_, ny_) or 1
+            wdt = 3.5 * s * lk
+            mx, my = (px + tx) / 2, (py + ty) / 2
+            ctx.move_to(px, py)
+            ctx.curve_to(mx + nx_ / nrm * wdt, my + ny_ / nrm * wdt, mx + nx_ / nrm * wdt, my + ny_ / nrm * wdt, tx, ty)
+            ctx.curve_to(mx - nx_ / nrm * wdt, my - ny_ / nrm * wdt, mx - nx_ / nrm * wdt, my - ny_ / nrm * wdt, px, py)
+        ctx.set_source_rgba(1, 1, 1, 0.38 * lum); ctx.fill()
+
+
+def _v_reflection(ctx, x, top, bot, size, alpha, t, s):
+    """kolom pantulan: garis-garis datar yang makin pendek dan pudar ke bawah."""
+    y = top + 4 * s
+    i = 0
+    while y < bot and alpha > 0.02:
+        f = (y - top) / (bot - top)
+        half = size * (1.0 - 0.6 * f) * (0.7 + 0.3 * math.sin(t * 1.3 + i * 1.7))
+        off = 3 * s * math.sin(t * 0.9 + i * 0.8)
+        ctx.move_to(x - half + off, y); ctx.line_to(x + half + off, y)
+        ctx.set_source_rgba(1, 1, 1, alpha * (1 - f) ** 1.4)
+        ctx.set_line_width(1.6 * s); ctx.stroke()
+        y += (7 + 10 * f) * s
+        i += 1
+
+
+def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, fog=False):
+    """bodies: (x, y, r, alpha) matahari/bulan di langit -> pantulan di danau;
+    night 0..1 dan fog -> ketebalan kabut di atas danau."""
+    g = _v_geometry(W, H)
+    s = W / 2560
+    ctx.set_line_cap(1)
+    yb = VALLEY_HORIZON * H
+    for x, y, r, al in bodies:
+        top = _v_skyline(W, H, x)                         # tertutup bukit -> tanpa pantulan
+        if y < yb and y + r < top and al > 0.02:
+            _v_reflection(ctx, x, yb + 0.02 * H, H, r * 1.6, al * 0.55 * lum, t, s)
+    lake_mist(ctx, W, H, t, night, 1.0 if fog else 0.0, lum)
+    for kind, x, y, k, data in g["trees"]:
+        (_v_willow if kind == "willow" else _v_bamboo)(ctx, x, y, k, data, t, wind, s, lum)
+    if birds:
+        for fx, fy, flock, v in g["flocks"]:
+            cx = ((fx + t * v) % 1.4 - 0.2) * W
+            cy = (fy + 0.01 * math.sin(t * 0.07 + fx * 9)) * H
+            for dx, dy, ph, k in flock:
+                bx = cx + dx * W + 4 * s * math.sin(t * 0.5 + ph)
+                by = cy + dy * H + 3 * s * math.sin(t * 0.7 + ph * 1.3)
+                span = 7 * s * k
+                flap = math.sin(t * 7 + ph) * 0.6 + 0.2
+                ctx.move_to(bx - span, by - span * flap)
+                ctx.curve_to(bx - span * 0.5, by - span * 0.3, bx - 1, by, bx, by)
+                ctx.curve_to(bx + 1, by, bx + span * 0.5, by - span * 0.3, bx + span, by - span * flap)
+            ctx.set_source_rgba(1, 1, 1, 0.65 * lum); ctx.set_line_width(1.3 * s); ctx.stroke()
+
+
+def _v_skyline(W, H, x):
+    """y (piksel) tepi atas bukit/batu tertinggi di kolom x (cakrawala kalau kosong)."""
+    best = VALLEY_HORIZON
+    for poly in (V_MID_LEFT, V_MID_LEFT2, V_MID_RIGHT, V_PILLAR, V_FRONT_LEFT, V_FRONT_ISLAND,
+                 V_FRONT_RIGHT, V_SMALL_ROCK):
+        y = _v_interp(poly, x / W)
+        if y is not None:
+            best = min(best, y)
+    return best * H
+
+
+# ── awan: sapuan kuas tinta yang lembut ──────────────────────────────────────
+_V_INK = {}
+
+
+def _v_ink_sprite(W, seed, heavy):
+    """satu gumpalan awan: beberapa elips bergradasi lembut yang memanjang
+    mendatar, tanpa garis tepi. Disimpan sebagai gambar (dibuat sekali)."""
+    import cairo
+    key = (W, seed, round(heavy, 1))
+    if key in _V_INK:
+        return _V_INK[key]
+    rng = random.Random(seed)
+    s = W / 2560
+    w, h = int(rng.uniform(420, 760) * s * heavy), int(rng.uniform(110, 190) * s * heavy)
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    c = cairo.Context(surf)
+    for _ in range(int(11 * heavy) + 5):
+        # tiap elips muat utuh di dalam gambar: tepi tetap lembut, tidak terpotong
+        rx, ry = rng.uniform(0.09, 0.22) * w, rng.uniform(0.16, 0.34) * h
+        cx = rng.uniform(rx, w - rx)
+        cy = min(h - ry, max(ry, h * (0.62 - 0.35 * (1 - abs(cx / w - 0.5) * 2) * rng.random())))
+        al = rng.uniform(0.3, 0.75)
+        c.save()
+        c.translate(cx, cy); c.scale(rx, ry)
+        gr = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
+        gr.add_color_stop_rgba(0.0, 1, 1, 1, al)
+        gr.add_color_stop_rgba(0.6, 1, 1, 1, al * 0.35)
+        gr.add_color_stop_rgba(1.0, 1, 1, 1, 0)
+        c.set_source(gr); c.arc(0, 0, 1, 0, 2 * math.pi); c.fill()
+        c.restore()
+    # serat kuas: goresan mendatar tipis di bagian bawah gumpalan
+    c.set_line_cap(1)
+    for _ in range(int(10 * heavy)):
+        y = rng.uniform(0.62, 0.8) * h
+        x0 = rng.uniform(0.12, 0.45) * w
+        c.move_to(x0, y); c.line_to(min(w * 0.9, x0 + rng.uniform(0.2, 0.4) * w), y + rng.uniform(-2, 2) * s)
+        c.set_source_rgba(1, 1, 1, rng.uniform(0.15, 0.35)); c.set_line_width(rng.uniform(1, 3) * s)
+        c.stroke()
+    _V_INK[key] = (surf, w, h)
+    return _V_INK[key]
+
+
+def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0):
+    """awan tinta; cover 0..1, vx = kecepatan angin di layar (px/detik)."""
+    n = round(cover * 9)
+    if n == 0:
+        return
+    heavy = 1 + 0.6 * rain
+    # siang jelas, malam samar (lebih terlihat saat bulan terang)
+    alpha = (0.42 * (1 - night) + night * (0.10 + 0.22 * moon_lit)) * (1 + 0.4 * rain) * lum
+    for i in range(n):
+        surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+        r = random.Random(500 + i)
+        span = W + w
+        x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
+        y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
+        ctx.set_source_surface(surf, x, y)
+        ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())))
+
+
+# ── kabut di atas danau ──────────────────────────────────────────────────────
+_V_MIST = {}
+
+
+def _v_mist_sprite(W, H, k):
+    import cairo
+    key = (W, H, k)
+    if key in _V_MIST:
+        return _V_MIST[key]
+    rng = random.Random(900 + k)
+    w, h = int(W * rng.uniform(0.45, 0.8)), int(H * rng.uniform(0.04, 0.08))
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    c = cairo.Context(surf)
+    for _ in range(6):
+        rx, ry = rng.uniform(0.15, 0.3) * w, rng.uniform(0.3, 0.48) * h
+        cx, cy = rng.uniform(rx, w - rx), rng.uniform(ry, h - ry)
+        c.save(); c.translate(cx, cy); c.scale(rx, ry)
+        gr = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
+        gr.add_color_stop_rgba(0, 1, 1, 1, 0.5)
+        gr.add_color_stop_rgba(1, 1, 1, 1, 0)
+        c.set_source(gr); c.arc(0, 0, 1, 0, 2 * math.pi); c.fill(); c.restore()
+    _V_MIST[key] = (surf, w, h)
+    return _V_MIST[key]
+
+
+def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
+    """pita kabut yang melayang pelan di atas danau: tebal malam, tipis siang."""
+    alpha = (0.05 + 0.30 * night + 0.25 * fog) * lum
+    if alpha < 0.02:
+        return
+    yb = VALLEY_HORIZON * H
+    for k in range(5):
+        surf, w, h = _v_mist_sprite(W, H, k)
+        r = random.Random(950 + k)
+        span = W + w
+        x = (r.random() * span + (4 + 6 * r.random()) * (W / 2560) * t * (1 if k % 2 else -1)) % span - w
+        y = yb + (-0.008 + 0.10 * (k / 4) ** 1.3) * H - h / 2
+        ctx.set_source_surface(surf, x, y)
+        ctx.paint_with_alpha(min(1.0, alpha * (1 - 0.15 * k)))
+
+
+def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
+    """scene valley: satu bingkai layar penuh (langit, awan, bukit, danau, pohon, hujan)."""
+    raise NotImplementedError
+
+
+# scene: None = langit dan laut digambar terpisah (jalur lama), selain itu fungsi
+# yang menggambar satu bingkai layar penuh
 SCENES = {
-    "sea": (None, draw_sea),
-    "valley": (draw_valley_sky, draw_valley),
+    "sea": None,
+    "valley": draw_valley_frame,
 }
-
-
-def draw_ground(ctx, w, h, a, t, cfg, h_sky, wx=None):
-    """pemandangan di bawah cakrawala sesuai cfg["scene"]."""
-    SCENES[cfg.get("scene", "sea")][1](ctx, w, h, a, t, cfg, h_sky, wx)
 
 
 # ── preview (tanpa GTK) ─────────────────────────────────────────────────────
@@ -1254,7 +1257,7 @@ def preview(out, size, when, weather=None, scene=None):
     ctx.translate(0, h_sky)
     ctx.rectangle(0, 0, w, h - h_sky)
     ctx.clip()
-    draw_ground(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
+    draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
     ctx.restore()
     surf.write_to_png(out)
     deg = lambda r: r / D2R
@@ -1332,7 +1335,7 @@ def run():
             key = (w, h, state["gen"])
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
                 surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"], geo.height)
+                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"])
                 cache["surf"], cache["key"] = surf, key
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
@@ -1340,8 +1343,8 @@ def run():
                 draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, geo.height)
 
         sky.set_draw_func(draw_sky_cb)
-        sea.set_draw_func(lambda _a, c, w, h: draw_ground(c, w, h, state["a"], time.time(), cfg,
-                                                          sky.get_height(), state["wx"]))
+        sea.set_draw_func(lambda _a, c, w, h: draw_sea(c, w, h, state["a"], time.time(), cfg,
+                                                       sky.get_height(), state["wx"]))
         box.append(sky); box.append(sea)
         win.set_child(box)
 
