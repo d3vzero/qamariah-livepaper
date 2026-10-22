@@ -842,6 +842,7 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
 #   burung) -> 5. hujan
 #   VALLEY_HORIZON = garis danau (batas langit untuk project()).
 VALLEY_HORIZON = 0.70
+VALLEY_SLOW_FPS = 4        # awan, pantulan, kabut danau, pohon: diperbarui 4x per detik
 
 # bukit tengah (samar, memudar ke kabut): garis atas sebagai pecahan (x, y)
 V_MID_LEFT = [(0.00, 0.47), (0.04, 0.43), (0.08, 0.41), (0.12, 0.43), (0.16, 0.40),
@@ -1085,18 +1086,26 @@ def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, 
     for kind, x, y, k, data in g["trees"]:
         (_v_willow if kind == "willow" else _v_bamboo)(ctx, x, y, k, data, t, wind, s, lum)
     if birds:
-        for fx, fy, flock, v in g["flocks"]:
-            cx = ((fx + t * v) % 1.4 - 0.2) * W
-            cy = (fy + 0.01 * math.sin(t * 0.07 + fx * 9)) * H
-            for dx, dy, ph, k in flock:
-                bx = cx + dx * W + 4 * s * math.sin(t * 0.5 + ph)
-                by = cy + dy * H + 3 * s * math.sin(t * 0.7 + ph * 1.3)
-                span = 7 * s * k
-                flap = math.sin(t * 7 + ph) * 0.6 + 0.2
-                ctx.move_to(bx - span, by - span * flap)
-                ctx.curve_to(bx - span * 0.5, by - span * 0.3, bx - 1, by, bx, by)
-                ctx.curve_to(bx + 1, by, bx + span * 0.5, by - span * 0.3, bx + span, by - span * flap)
-            ctx.set_source_rgba(1, 1, 1, 0.65 * lum); ctx.set_line_width(1.3 * s); ctx.stroke()
+        valley_birds(ctx, W, H, t, lum)
+
+
+def valley_birds(ctx, W, H, t, lum):
+    """gerombolan burung (saat cerah); dikepak per frame."""
+    g = _v_geometry(W, H)
+    s = W / 2560
+    ctx.set_line_cap(1)
+    for fx, fy, flock, v in g["flocks"]:
+        cx = ((fx + t * v) % 1.4 - 0.2) * W
+        cy = (fy + 0.01 * math.sin(t * 0.07 + fx * 9)) * H
+        for dx, dy, ph, k in flock:
+            bx = cx + dx * W + 4 * s * math.sin(t * 0.5 + ph)
+            by = cy + dy * H + 3 * s * math.sin(t * 0.7 + ph * 1.3)
+            span = 7 * s * k
+            flap = math.sin(t * 7 + ph) * 0.6 + 0.2
+            ctx.move_to(bx - span, by - span * flap)
+            ctx.curve_to(bx - span * 0.5, by - span * 0.3, bx - 1, by, bx, by)
+            ctx.curve_to(bx + 1, by, bx + span * 0.5, by - span * 0.3, bx + span, by - span * flap)
+        ctx.set_source_rgba(1, 1, 1, 0.65 * lum); ctx.set_line_width(1.3 * s); ctx.stroke()
 
 
 def _v_skyline(W, H, x):
@@ -1211,6 +1220,11 @@ def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
         ctx.paint_with_alpha(min(1.0, alpha * (1 - 0.15 * k)))
 
 
+def valley_birds_on(a, wx):
+    """burung terbang saat matahari terbit, tidak mendung, tidak hujan."""
+    return sun_up(a) and wx["cover"] < 0.5 and wx["rain"] == 0
+
+
 _V_FRAME = {}
 
 
@@ -1221,45 +1235,62 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     h_sky = int(H * VALLEY_HORIZON)
     lum = round(scene_lum(a, cfg, wx), 3)
     dx, dy = (round(v) for v in drift(t, cfg["drift"]))
-    cache = _V_FRAME.setdefault((W, H), {"sky": (None, None), "static": (None, None)})
-    # 1. langit dasar (bintang, planet, matahari, bulan): cache per gen
-    if cache["sky"][0] != gen:
-        surf = cairo.ImageSurface(cairo.FORMAT_RGB24, W, h_sky)
-        draw_sky_base(cairo.Context(surf), W, h_sky, a, t, cfg, wx)
-        cache["sky"] = (gen, surf)
-    ctx.set_source_rgb(0, 0, 0)
-    ctx.paint()
-    ctx.set_source_surface(cache["sky"][1], 0, 0)
-    ctx.paint()
-    # 2. awan tinta (menggantikan awan garis)
-    moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
-    ink_clouds(ctx, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), t)
-    # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
-    key = (lum, dx, dy)
-    if cache["static"][0] != key:
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
-        c = cairo.Context(surf)
+    cache = _V_FRAME.setdefault((W, H), {"sky": (None, None), "static": (None, None),
+                                          "frame": (None, None)})
+    # kuantisasi waktu: elemen lambat diperbarui 4x/detik, elemen cepat per frame
+    tq = math.floor(t * VALLEY_SLOW_FPS) / VALLEY_SLOW_FPS
+    key = (gen, tq, lum, dx, dy)
+    if cache["frame"][0] != key:
+        surf = cache["frame"][1] or cairo.ImageSurface(cairo.FORMAT_RGB24, W, H)
+        c = cairo.Context(surf)                      # dipakai ulang: hemat alokasi 16 MB
+        c.set_source_rgb(0, 0, 0)
+        c.paint()
+        # 1. langit dasar (bintang, planet, matahari, bulan): cache per gen
+        if cache["sky"][0] != gen:
+            sky_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, W, h_sky)
+            draw_sky_base(cairo.Context(sky_surf), W, h_sky, a, t, cfg, wx)
+            cache["sky"] = (gen, sky_surf)
+        c.set_source_surface(cache["sky"][1], 0, 0)
+        c.paint()
+        # 2. awan tinta (menggantikan awan garis)
+        moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
+        ink_clouds(c, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), tq)
+        # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
+        skey = (lum, dx, dy)
+        if cache["static"][0] != skey:
+            s_surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+            s_ctx = cairo.Context(s_surf)
+            s_ctx.translate(dx, dy)
+            valley_static(s_ctx, W, H, lum)
+            cache["static"] = (skey, s_surf)
+        c.set_source_surface(cache["static"][1], 0, 0)
+        c.paint()
+        # 4. animasi: pantulan, kabut danau, pohon (tanpa burung)
+        r_sun, r_moon = radii(W, a, cfg)
+        fade = max(0.0, 1 - wx["cover"] / 0.7)      # mendung -> pantulan hilang
+        bodies = []
+        if sun_up(a):
+            bx, by = project(*a["sun"], W, h_sky)
+            bodies.append((bx, by, r_sun, 0.9 * fade))
+        if moon_visible(a, cfg):
+            bx, by = project(*a["moon"], W, h_sky)
+            bodies.append((bx, by, r_moon, a["illum"] * fade))
+        c.save()
         c.translate(dx, dy)
-        valley_static(c, W, H, lum)
-        cache["static"] = (key, surf)
-    ctx.set_source_surface(cache["static"][1], 0, 0)
-    ctx.paint()
-    # 4. animasi: pantulan, kabut danau, pohon, burung
-    r_sun, r_moon = radii(W, a, cfg)
-    fade = max(0.0, 1 - wx["cover"] / 0.7)          # mendung -> pantulan hilang
-    bodies = []
-    if sun_up(a):
-        x, y = project(*a["sun"], W, h_sky)
-        bodies.append((x, y, r_sun, 0.9 * fade))
-    if moon_visible(a, cfg):
-        x, y = project(*a["moon"], W, h_sky)
-        bodies.append((x, y, r_moon, a["illum"] * fade))
-    birds = sun_up(a) and wx["cover"] < 0.5 and wx["rain"] == 0
+        valley_anim(c, W, H, tq, lum, wind=wx["wind"], birds=False, bodies=bodies,
+                    night=a["night"], fog=wx["fog"])
+        c.restore()
+        cache["frame"] = (key, surf)
     ctx.save()
-    ctx.translate(dx, dy)
-    valley_anim(ctx, W, H, t, lum, wind=wx["wind"], birds=birds, bodies=bodies,
-                night=a["night"], fog=wx["fog"])
+    ctx.set_operator(cairo.OPERATOR_SOURCE)
+    ctx.set_source_surface(cache["frame"][1], 0, 0)
+    ctx.paint()
     ctx.restore()
+    if valley_birds_on(a, wx):                       # burung: per frame (kepak sayap cepat)
+        ctx.save()
+        ctx.translate(dx, dy)
+        valley_birds(ctx, W, H, t, lum)
+        ctx.restore()
     # 5. hujan
     draw_rain(ctx, W, 0, H, H, wx, t)
     draw_lightning(ctx, wx, t, cfg)
@@ -1386,7 +1417,10 @@ def run():
 
             def tick_full(_w, clock):
                 now = clock.get_frame_time()
-                if now - last_f["t"] >= 1_000_000 / cfg["fps"]:
+                wx = state["wx"] or WEATHER_FIXED["clear"]
+                fast = valley_birds_on(state["a"], wx) or wx["rain"] > 0 or wx["thunder"]
+                period = 1_000_000 / (cfg["fps"] if fast else VALLEY_SLOW_FPS)
+                if now - last_f["t"] >= period:
                     last_f["t"] = now
                     area.queue_draw()
                 return True
