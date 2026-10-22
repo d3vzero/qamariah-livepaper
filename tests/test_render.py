@@ -33,6 +33,8 @@ CASES = [
     ("valley-malam",   "2026-10-20 22:00", "clear", "valley"),
     ("valley-hujan",   "2026-10-20 18:05", "rain",  "valley"),
 ]
+# persentase piksel hitam yang diharapkan per scene (valley: lukisan tinta bergradasi)
+BLACK_PCT = {"sea": (95, 100), "valley": (60, 80)}
 # toleransi perbandingan dengan acuan
 MAX_DIFF_PIXELS = 0.0005   # pecahan piksel yang boleh berbeda
 MAX_CHANNEL_DIFF = 24      # selisih terbesar satu kanal (0..255)
@@ -91,16 +93,17 @@ class Render(unittest.TestCase):
                                  "%s ukuran (%d,%d) != %s" % (nama, w, h, SIZE))
 
     def test_mostly_black(self):
-        for nama, *_ in CASES:
+        for nama, *args in CASES:
             with self.subTest(nama=nama):
                 path = os.path.join(self.tmpdir.name, "%s.png" % nama)
                 w, h, arr = load(path)
                 black = np.sum((arr == 0).all(axis=2))
                 total = w * h
                 pct = black / total * 100
-                self.assertGreater(pct, 95,
-                                   "%s hanya %.2f%% piksel hitam (butuh >95%%)"
-                                   % (nama, pct))
+                lo, hi = BLACK_PCT[args[2] if len(args) > 2 else "sea"]
+                self.assertTrue(lo < pct < hi,
+                                "%s %.2f%% piksel hitam (butuh %s..%s%%)"
+                                % (nama, pct, lo, hi))
 
     def test_matches_reference(self):
         update = os.environ.get("UPDATE_REF") == "1"
