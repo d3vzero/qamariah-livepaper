@@ -848,7 +848,7 @@ VALLEY_SLOW_FPS = 4        # awan, pantulan, kabut danau, pohon: diperbarui 4x p
 V_MID_LEFT = [(0.00, 0.47), (0.04, 0.43), (0.08, 0.41), (0.12, 0.43), (0.16, 0.40),
               (0.20, 0.35), (0.235, 0.31), (0.26, 0.30), (0.285, 0.33), (0.30, 0.38),
               (0.33, 0.45), (0.37, 0.52), (0.40, 0.58), (0.43, 0.655), (0.455, 0.70)]
-V_MID_LEFT2 = [(0.12, 0.56), (0.16, 0.52), (0.20, 0.50), (0.24, 0.53), (0.28, 0.58),
+V_MID_LEFT2 = [(0.07, 0.70), (0.12, 0.56), (0.16, 0.52), (0.20, 0.50), (0.24, 0.53), (0.28, 0.58),
                (0.32, 0.62), (0.36, 0.665), (0.40, 0.70)]
 V_MID_RIGHT = [(0.635, 0.70), (0.665, 0.65), (0.70, 0.58), (0.74, 0.52), (0.77, 0.47), (0.80, 0.445),
                (0.83, 0.46), (0.86, 0.50), (0.90, 0.53), (0.94, 0.55), (1.00, 0.57)]
@@ -906,8 +906,11 @@ def _v_geometry(W, H, seed=11):
         return _V_GEO[key]
     rng = random.Random(seed)
     P = lambda poly, amp=0.004, n=5: [(x * W, y * H) for x, y in _v_rough(poly, rng, amp, n)]
-    g = {"mid": [(P(V_MID_LEFT, 0.006), 0.20), (P(V_MID_RIGHT, 0.006), 0.18),
-                 (P(V_PILLAR, 0.003, 4), 0.24), (P(V_MID_LEFT2, 0.005), 0.26)],
+    mid = [(P(V_MID_LEFT, 0.006), 0.20), (P(V_MID_RIGHT, 0.006), 0.18), (P(V_PILLAR, 0.003, 4), 0.24)]
+    # lereng kiri MID_LEFT2 (segmen pertama) memakai rng sendiri: jitter bukit dan batu lain tidak bergeser
+    slope = [(x * W, y * H) for x, y in _v_rough(V_MID_LEFT2[:2], random.Random(seed + 1), 0.005)]
+    mid.append((slope[:-1] + P(V_MID_LEFT2[1:], 0.005), 0.26))
+    g = {"mid": mid,
          "front": [(P(V_FRONT_LEFT, 0.005), 0.34), (P(V_FRONT_ISLAND, 0.004, 4), 0.38),
                    (P(V_FRONT_RIGHT, 0.004), 0.30), (P(V_SMALL_ROCK, 0.003, 3), 0.32)]}
     # sapuan kuas kering di batu depan: garis hitam pendek miring (tekstur tinta)
