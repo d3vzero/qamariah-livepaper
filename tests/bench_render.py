@@ -48,13 +48,13 @@ def bench(cases, size, frames, scene="sea"):
         # --- base ---
         base_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h_sky)
         if wx_in_base:
-            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx, h)
+            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx)
         else:
             livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg)
         t_start = time.perf_counter()
         ctx_b = cairo.Context(base_surf)
         if wx_in_base:
-            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx, h)
+            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx)
         else:
             livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg)
         base_ms = (time.perf_counter() - t_start) * 1000
@@ -62,12 +62,12 @@ def bench(cases, size, frames, scene="sea"):
         # --- laut / lembah (sesuai scene) ---
         sea_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h - h_sky)
         # warmup
-        livepaper.draw_ground(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
+        livepaper.draw_sea(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
         # measure
         sea_total = 0.0
         for k in range(frames):
             t_start = time.perf_counter()
-            livepaper.draw_ground(
+            livepaper.draw_sea(
                 cairo.Context(sea_surf), w, h - h_sky, a,
                 t0 + k / cfg["fps"], cfg, h_sky, wx
             )
@@ -126,6 +126,50 @@ def print_table(results, size, frames, repeat, scene):
         )
 
 
+def bench_full(cases, size, frames, scene):
+    w, h = size
+    cfg = livepaper.load_config()
+    cfg["lightning"] = False
+    cfg["scene"] = scene
+    render = livepaper.SCENES[scene]
+
+    results = []
+
+    for gen, (name, waktu, cuaca) in enumerate(cases, 1):   # gen beda per kasus: cache langit diganti
+        now = datetime.datetime.strptime(waktu, "%Y-%m-%d %H:%M").astimezone()
+        a = livepaper.full_state(now, cfg)
+        wx = dict(livepaper.WEATHER_FIXED[cuaca], source=cuaca)
+        t0 = now.timestamp()
+
+        surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
+        render(cairo.Context(surf), w, h, a, wx, t0, cfg, gen)              # pemanasan: isi cache
+
+        times = []
+        for k in range(frames):
+            t_start = time.perf_counter()
+            render(cairo.Context(surf), w, h, a, wx, t0 + k / cfg["fps"], cfg, gen)
+            times.append(time.perf_counter() - t_start)
+        avg_ms = sum(times) / frames * 1000
+        max_ms = max(times) * 1000
+        render_ms = avg_ms * cfg["fps"]
+        results.append((name, avg_ms, max_ms, cfg["fps"], render_ms, render_ms / 10.0))
+
+    return results
+
+
+def print_table_full(results, size, frames, repeat, scene):
+    print(f"scene {scene}, ukuran {size[0]}x{size[1]}, {frames} frame, terbaik dari {repeat}")
+    print(
+        f"{'kasus':<14}{'frame ms':>9}  {'maks ms':>9}  "
+        f"{'fps':>5}  {'render ms/detik':>16}  {'% core':>7}"
+    )
+    for name, avg_ms, max_ms, fps, render_ms, pct in results:
+        print(
+            f"{name:<14}{avg_ms:>9.2f}  {max_ms:>9.2f}  "
+            f"{fps:>5d}  {render_ms:>16.1f}  {pct:>6.1f}"
+        )
+
+
 def main():
     cases = [
         ("siang cerah",  "2026-10-20 12:00", "clear"),
@@ -146,17 +190,32 @@ def main():
                         help="Pemandangan di bawah cakrawala (default: sea)")
     args = parser.parse_args()
 
-    best = None
-    best_total = float("inf")
+    scene_fn = livepaper.SCENES[args.scene]
 
-    for r in range(args.repeat):
-        res = bench(cases, args.size, args.frames, args.scene)
-        total = sum(r_[5] for r_ in res)
-        if total < best_total:
-            best_total = total
-            best = res
+    if scene_fn is None:
+        best = None
+        best_total = float("inf")
 
-    print_table(best, args.size, args.frames, args.repeat, args.scene)
+        for r in range(args.repeat):
+            res = bench(cases, args.size, args.frames, args.scene)
+            total = sum(r_[5] for r_ in res)
+            if total < best_total:
+                best_total = total
+                best = res
+
+        print_table(best, args.size, args.frames, args.repeat, args.scene)
+    else:
+        best = None
+        best_total = float("inf")
+
+        for r in range(args.repeat):
+            res = bench_full(cases, args.size, args.frames, args.scene)
+            total = sum(r_[1] for r_ in res)
+            if total < best_total:
+                best_total = total
+                best = res
+
+        print_table_full(best, args.size, args.frames, args.repeat, args.scene)
 
 
 if __name__ == "__main__":
