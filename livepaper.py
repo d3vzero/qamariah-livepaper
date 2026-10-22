@@ -1211,9 +1211,58 @@ def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
         ctx.paint_with_alpha(min(1.0, alpha * (1 - 0.15 * k)))
 
 
+_V_FRAME = {}
+
+
 def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
-    """scene valley: satu bingkai layar penuh (langit, awan, bukit, danau, pohon, hujan)."""
-    raise NotImplementedError
+    """scene valley: satu bingkai layar penuh (langit, awan, bukit, danau, pohon, hujan).
+    gen naik setiap data langit berganti (20 detik) -> langit dasar digambar ulang."""
+    import cairo
+    h_sky = int(H * VALLEY_HORIZON)
+    lum = round(scene_lum(a, cfg, wx), 3)
+    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
+    cache = _V_FRAME.setdefault((W, H), {"sky": (None, None), "static": (None, None)})
+    # 1. langit dasar (bintang, planet, matahari, bulan): cache per gen
+    if cache["sky"][0] != gen:
+        surf = cairo.ImageSurface(cairo.FORMAT_RGB24, W, h_sky)
+        draw_sky_base(cairo.Context(surf), W, h_sky, a, t, cfg, wx)
+        cache["sky"] = (gen, surf)
+    ctx.set_source_rgb(0, 0, 0)
+    ctx.paint()
+    ctx.set_source_surface(cache["sky"][1], 0, 0)
+    ctx.paint()
+    # 2. awan tinta (menggantikan awan garis)
+    moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
+    ink_clouds(ctx, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), t)
+    # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
+    key = (lum, dx, dy)
+    if cache["static"][0] != key:
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+        c = cairo.Context(surf)
+        c.translate(dx, dy)
+        valley_static(c, W, H, lum)
+        cache["static"] = (key, surf)
+    ctx.set_source_surface(cache["static"][1], 0, 0)
+    ctx.paint()
+    # 4. animasi: pantulan, kabut danau, pohon, burung
+    r_sun, r_moon = radii(W, a, cfg)
+    fade = max(0.0, 1 - wx["cover"] / 0.7)          # mendung -> pantulan hilang
+    bodies = []
+    if sun_up(a):
+        x, y = project(*a["sun"], W, h_sky)
+        bodies.append((x, y, r_sun, 0.9 * fade))
+    if moon_visible(a, cfg):
+        x, y = project(*a["moon"], W, h_sky)
+        bodies.append((x, y, r_moon, a["illum"] * fade))
+    birds = sun_up(a) and wx["cover"] < 0.5 and wx["rain"] == 0
+    ctx.save()
+    ctx.translate(dx, dy)
+    valley_anim(ctx, W, H, t, lum, wind=wx["wind"], birds=birds, bodies=bodies,
+                night=a["night"], fog=wx["fog"])
+    ctx.restore()
+    # 5. hujan
+    draw_rain(ctx, W, 0, H, H, wx, t)
+    draw_lightning(ctx, wx, t, cfg)
 
 
 # scene: None = langit dan laut digambar terpisah (jalur lama), selain itu fungsi
@@ -1252,13 +1301,16 @@ def preview(out, size, when, weather=None, scene=None):
     h_sky = int(h * cfg["horizon"])
     surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
     ctx = cairo.Context(surf)
-    draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
-    ctx.save()
-    ctx.translate(0, h_sky)
-    ctx.rectangle(0, 0, w, h - h_sky)
-    ctx.clip()
-    draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
-    ctx.restore()
+    if SCENES[cfg["scene"]] is not None:
+        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg)
+    else:
+        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
+        ctx.save()
+        ctx.translate(0, h_sky)
+        ctx.rectangle(0, 0, w, h - h_sky)
+        ctx.clip()
+        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
+        ctx.restore()
     surf.write_to_png(out)
     deg = lambda r: r / D2R
     print(f"{out}: {now:%Y-%m-%d %H:%M}  matahari alt {deg(a['sun'][0]):5.1f}° az {deg(a['sun'][1]):5.1f}°, "
@@ -1323,6 +1375,24 @@ def run():
         Layer.set_keyboard_mode(win, Layer.KeyboardMode.NONE)
 
         geo = monitor.get_geometry()
+        render = SCENES[cfg["scene"]]
+        if render:
+            area = Gtk.DrawingArea()
+            area.set_hexpand(True); area.set_vexpand(True)
+            area.set_draw_func(lambda _a, c, w, h: render(c, w, h, state["a"], state["wx"] or
+                                                          WEATHER_FIXED["clear"], time.time(), cfg, state["gen"]))
+            win.set_child(area)
+            last_f = {"t": 0}
+
+            def tick_full(_w, clock):
+                now = clock.get_frame_time()
+                if now - last_f["t"] >= 1_000_000 / cfg["fps"]:
+                    last_f["t"] = now
+                    area.queue_draw()
+                return True
+            area.add_tick_callback(tick_full)
+            win.present()
+            return
         h_sky = int(geo.height * cfg["horizon"])
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sky, sea = Gtk.DrawingArea(), Gtk.DrawingArea()
