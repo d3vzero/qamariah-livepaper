@@ -29,6 +29,8 @@ Pakai:
       [--size 2560x1600] [--time "2026-10-20 19:30"]
       [--weather clear|cloudy|rain|storm|fog|sim|live]
       [--scene sea|valley]
+      [--scale 0.5|0.75|1.0]
+  qamariah-livepaper --list-scenes      daftar scene
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -60,7 +62,14 @@ DEFAULTS = {
     "lightning": "yes",     # kilat redup saat badai
     "sky_fps": "4",         # fps langit saat ada awan (hujan memakai fps laut)
     "scene": "sea",         # sea | valley (pemandangan di bawah cakrawala)
+    "render_scale": "1.0",  # skala resolusi render: 1.0 penuh | 0.75 | 0.5
 }
+RENDER_SCALES = (0.5, 0.75, 1.0)
+
+
+def snap_scale(v):
+    """Kembalikan nilai terdekat dari RENDER_SCALES."""
+    return min(RENDER_SCALES, key=lambda x: abs(x - v))
 
 
 def load_config():
@@ -80,6 +89,11 @@ def load_config():
         print("qamariah-livepaper: scene tidak dikenal '%s', memakai sea" % scene,
               file=sys.stderr)
         scene = "sea"
+    raw_scale = c.getfloat("render_scale")
+    scale = snap_scale(raw_scale)
+    if scale != raw_scale:
+        print("qamariah-livepaper: render_scale %.2f tidak dikenal; memakai %.2f" % (raw_scale, scale),
+              file=sys.stderr)
     return {
         "lat": c.getfloat("lat"), "lon": c.getfloat("lon"),
         "fps": max(1, min(30, c.getint("fps"))),
@@ -97,6 +111,7 @@ def load_config():
         "lightning": c.getboolean("lightning"),
         "sky_fps": max(1, min(30, c.getint("sky_fps"))),
         "scene": scene,
+        "render_scale": scale,
     }
 
 
@@ -380,10 +395,10 @@ class Weather:
 
 
 # ── gambar ──────────────────────────────────────────────────────────────────
-def drift(t, on):
+def drift(t, on, scale=1.0):
     if not on:
         return 0.0, 0.0
-    return 6 * math.sin(2 * math.pi * t / 3600), 4 * math.sin(2 * math.pi * t / 5400)
+    return (6 * scale) * math.sin(2 * math.pi * t / 3600), (4 * scale) * math.sin(2 * math.pi * t / 5400)
 
 
 def project(alt, az, w, h_sky):
@@ -509,7 +524,7 @@ def draw_sky_base(ctx, w, h, a, t, cfg, wx=None):
     """bagian langit yang berubah lambat: bintang, planet, matahari, bulan."""
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
-    dx, dy = drift(t, cfg["drift"])
+    dx, dy = drift(t, cfg["drift"], cfg.get("render_scale", 1.0))
     ctx.save()
     ctx.translate(dx, dy)
     r_sun, r_moon = radii(w, a, cfg)
@@ -763,7 +778,7 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     import numpy as np
     ctx.set_source_rgb(0, 0, 0)
     ctx.paint()
-    dx, dy = drift(t, cfg["drift"])
+    dx, dy = drift(t, cfg["drift"], cfg.get("render_scale", 1.0))
     ctx.save()
     ctx.translate(dx, dy)
     n = cfg["waves"]
@@ -1237,7 +1252,7 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     import cairo
     h_sky = int(H * VALLEY_HORIZON)
     lum = round(scene_lum(a, cfg, wx), 3)
-    dx, dy = (round(v) for v in drift(t, cfg["drift"]))
+    dx, dy = (round(v) for v in drift(t, cfg["drift"], cfg.get("render_scale", 1.0)))
     cache = _V_FRAME.setdefault((W, H), {"sky": (None, None), "static": (None, None),
                                           "frame": (None, None)})
     # kuantisasi waktu: elemen lambat diperbarui 4x/detik, elemen cepat per frame
@@ -1299,6 +1314,39 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     draw_lightning(ctx, wx, t, cfg)
 
 
+_SCALED = {}
+
+
+def paint_scaled(ctx, w, h, scale, draw):
+    """draw(c, sw, sh) menggambar di permukaan sw x sh (w, h dikali scale), lalu hasilnya
+    diperbesar ke w x h di ctx (filter GOOD). scale >= 1: draw langsung di ctx."""
+    if scale >= 1.0:
+        draw(ctx, w, h)
+        return
+    import cairo
+    sw = max(1, round(w * scale))
+    sh = max(1, round(h * scale))
+    key = (sw, sh)
+    if key not in _SCALED:
+        _SCALED[key] = cairo.ImageSurface(cairo.FORMAT_RGB24, sw, sh)
+    surf = _SCALED[key]
+    c = cairo.Context(surf)
+    c.set_source_rgb(0, 0, 0)
+    c.paint()
+    draw(c, sw, sh)
+    surf.flush()
+    ctx.save()
+    ctx.scale(w / sw, h / sh)
+    pat = cairo.SurfacePattern(surf)
+    pat.set_filter(cairo.FILTER_GOOD)
+    pat.set_extend(cairo.EXTEND_PAD)
+    ctx.set_source(pat)
+    ctx.set_operator(cairo.OPERATOR_SOURCE)
+    ctx.rectangle(0, 0, sw, sh)
+    ctx.fill()
+    ctx.restore()
+
+
 # scene: None = langit dan laut digambar terpisah (jalur lama), selain itu fungsi
 # yang menggambar satu bingkai layar penuh
 SCENES = {
@@ -1314,7 +1362,7 @@ def full_state(now, cfg):
     return a
 
 
-def preview(out, size, when, weather=None, scene=None):
+def preview(out, size, when, weather=None, scene=None, scale=None):
     import cairo
     cfg = load_config()
     cfg["lightning"] = False                         # kilat hanya sesaat; jangan ikut di gambar diam
@@ -1324,6 +1372,8 @@ def preview(out, size, when, weather=None, scene=None):
         if scene not in SCENES:
             sys.exit("scene tidak dikenal: %s" % scene)
         cfg["scene"] = scene
+    if scale is not None:
+        cfg["render_scale"] = snap_scale(float(scale))
     w, h = (int(v) for v in size.lower().split("x"))
     now = (datetime.strptime(when, "%Y-%m-%d %H:%M").astimezone() if when
            else datetime.now().astimezone())
@@ -1332,25 +1382,30 @@ def preview(out, size, when, weather=None, scene=None):
     wthr.poll(background=False)
     wx = wthr.get(now)
     t = now.timestamp()
-    h_sky = int(h * cfg["horizon"])
     surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
     ctx = cairo.Context(surf)
-    if SCENES[cfg["scene"]] is not None:
-        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg)
-    else:
-        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
-        ctx.save()
-        ctx.translate(0, h_sky)
-        ctx.rectangle(0, 0, w, h - h_sky)
-        ctx.clip()
-        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
-        ctx.restore()
+
+    def draw(c, w, h):
+        h_sky = int(h * cfg["horizon"])
+        if SCENES[cfg["scene"]] is not None:
+            SCENES[cfg["scene"]](c, w, h, a, wx, t, cfg)
+        else:
+            draw_sky(c, w, h_sky, a, t, cfg, wx, h)
+            c.save()
+            c.translate(0, h_sky)
+            c.rectangle(0, 0, w, h - h_sky)
+            c.clip()
+            draw_sea(c, w, h - h_sky, a, t, cfg, h_sky, wx)
+            c.restore()
+
+    paint_scaled(ctx, w, h, cfg["render_scale"], draw)
     surf.write_to_png(out)
+    skala_str = " skala %.2f" % cfg["render_scale"] if cfg["render_scale"] != 1.0 else ""
     deg = lambda r: r / D2R
     print(f"{out}: {now:%Y-%m-%d %H:%M}  matahari alt {deg(a['sun'][0]):5.1f}° az {deg(a['sun'][1]):5.1f}°, "
           f"bulan alt {deg(a['moon'][0]):5.1f}° az {deg(a['moon'][1]):5.1f}°, "
           f"fase {a['phase']:.2f} (terang {a['illum']:.0%}), jarak {a['moon_km']/1000:.0f} rb km, "
-          f"malam {a['night']:.0%}, gelombang {'→' if a['wave_dir'] > 0 else '←'} x{a['wave_amp']:.2f}")
+          f"malam {a['night']:.0%}, gelombang {'→' if a['wave_dir'] > 0 else '←'} x{a['wave_amp']:.2f}{skala_str}")
     vis = [f"{n} {alt / D2R:.0f}° m{mag:+.1f}" for n, alt, az, mag in a["planets"] if alt > 0]
     print(f"   planet di atas cakrawala: {', '.join(vis) or '-'}")
     print(f"   cuaca ({wx.get('source')}): awan {wx['cover']:.0%}, hujan {wx['rain']:.0%}, "
@@ -1410,11 +1465,13 @@ def run():
 
         geo = monitor.get_geometry()
         render = SCENES[cfg["scene"]]
+        scale = cfg["render_scale"]                  # < 1: gambar kecil lalu diperbesar (paint_scaled)
         if render:
             area = Gtk.DrawingArea()
             area.set_hexpand(True); area.set_vexpand(True)
-            area.set_draw_func(lambda _a, c, w, h: render(c, w, h, state["a"], state["wx"] or
-                                                          WEATHER_FIXED["clear"], time.time(), cfg, state["gen"]))
+            area.set_draw_func(lambda _a, c, w, h: paint_scaled(
+                c, w, h, scale, lambda cc, sw, sh: render(cc, sw, sh, state["a"], state["wx"] or
+                                                          WEATHER_FIXED["clear"], time.time(), cfg, state["gen"])))
             win.set_child(area)
             last_f = {"t": 0}
 
@@ -1437,7 +1494,7 @@ def run():
         sea.set_vexpand(True); sky.set_hexpand(True); sea.set_hexpand(True)
         cache = {"surf": None, "key": None}
 
-        def draw_sky_cb(_a, c, w, h):
+        def draw_sky_small(c, w, h):
             t = time.time()
             key = (w, h, state["gen"])
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
@@ -1447,11 +1504,12 @@ def run():
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
             if state["wx"]:
-                draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, geo.height)
+                draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, round(geo.height * scale))
 
-        sky.set_draw_func(draw_sky_cb)
-        sea.set_draw_func(lambda _a, c, w, h: draw_sea(c, w, h, state["a"], time.time(), cfg,
-                                                       sky.get_height(), state["wx"]))
+        sky.set_draw_func(lambda _a, c, w, h: paint_scaled(c, w, h, scale, draw_sky_small))
+        sea.set_draw_func(lambda _a, c, w, h: paint_scaled(
+            c, w, h, scale, lambda cc, sw, sh: draw_sea(cc, sw, sh, state["a"], time.time(), cfg,
+                                                        round(sky.get_height() * scale), state["wx"])))
         box.append(sky); box.append(sea)
         win.set_child(box)
 
@@ -1483,12 +1541,17 @@ def run():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args and args[0] == "--list-scenes":
+        for name in SCENES:
+            print(name)
+        sys.exit(0)
     if args and args[0] == "--preview":
         out = args[1] if len(args) > 1 else "livepaper-preview.png"
         size = args[args.index("--size") + 1] if "--size" in args else "2560x1600"
         when = args[args.index("--time") + 1] if "--time" in args else None
         wthr = args[args.index("--weather") + 1] if "--weather" in args else None
         scn = args[args.index("--scene") + 1] if "--scene" in args else None
-        preview(out, size, when, wthr, scn)
+        sc = args[args.index("--scale") + 1] if "--scale" in args else None
+        preview(out, size, when, wthr, scn, sc)
     else:
         run()
