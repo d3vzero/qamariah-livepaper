@@ -32,7 +32,7 @@ scene = jangan-diubah
 # pengaman: kalau source tidak sengaja menjalankan main, perintah yang berefek
 # (fuzzel, restart wallpaper, notifikasi) dan config sungguhan tidak tersentuh
 SAFE = tempfile.mkdtemp(prefix="qlp-menu-test-")
-for _name in ("fuzzel", "pgrep", "setsid", "notify-send", "wlr-randr"):
+for _name in ("fuzzel", "pgrep", "setsid", "notify-send"):
     with open(os.path.join(SAFE, _name), "w") as _f:
         _f.write("#!/bin/sh\nexit 1\n")
     os.chmod(os.path.join(SAFE, _name), 0o755)
@@ -86,7 +86,7 @@ class ConfigSet(unittest.TestCase):
     def test_add_missing_key_into_livepaper_section(self):
         self.write(SAMPLE)
         self.set("scene", "valley")
-        self.set("render_scale", "0.75")
+        self.set("waves", "14")
         got = self.read().splitlines()
         # baris lama tetap ada dan urutannya sama
         old = SAMPLE.splitlines()
@@ -95,7 +95,7 @@ class ConfigSet(unittest.TestCase):
         # baris baru ada di bagian [livepaper], bukan [lain]
         lain = got.index("[lain]")
         self.assertIn("scene = valley", got[:lain])
-        self.assertIn("render_scale = 0.75", got[:lain])
+        self.assertIn("waves = 14", got[:lain])
         self.assertGreater(got.index("scene = valley"), got.index("[livepaper]"))
         self.assertEqual(got[lain + 1:], ["scene = jangan-diubah"])
         self.assertIn(";scene = valley", got)
@@ -177,19 +177,6 @@ ans=$(sed -n "${n}p" "$FAKE/answers")
 [[ "$ans" == ESC || -z "$ans" ]] && exit 1
 printf '%s\n' "$ans"
 ''',
-    "wlr-randr": r'''#!/bin/bash
-cat <<'EOF'
-DP-3 "BOE 0x0C87 (DP-3)"
-  Make: BOE
-  Enabled: yes
-  Modes:
-    2560x1600 px, 60.000000 Hz (preferred)
-    2560x1600 px, 300.000000 Hz (current)
-  Position: 0,0
-  Transform: normal
-  Scale: 1.000000
-EOF
-''',
     # pgrep: PID "wallpaper" palsu (proses sleep milik test) selama masih hidup
     "pgrep": r'''#!/bin/bash
 echo "$*" >> "$FAKE/pgrep.log"
@@ -202,7 +189,7 @@ exit 0
 
 
 class Menu(unittest.TestCase):
-    """main() end-to-end dengan fuzzel, wlr-randr, pgrep, setsid, notify-send palsu."""
+    """main() end-to-end dengan fuzzel, pgrep, setsid, notify-send palsu."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -254,31 +241,29 @@ class Menu(unittest.TestCase):
             return f.read()
 
     def test_full_flow(self):
-        r = self.run_menu("1", "1", "1", "2")       # valley, Bandung, 75%, 15 FPS
+        r = self.run_menu("1", "1", "2")            # valley, Bandung, 15 FPS
         self.assertEqual(r.returncode, 0, r.stderr)
         want = (SAMPLE.replace("lat = -6.2\n", "lat = -6.914\n")
                       .replace("lon   =   106.8\n", "lon = 107.609\n")
                       .replace("fps = 12\n", "fps = 15\n"))
         got = self.read_config().splitlines()
-        self.assertEqual([l for l in got if l not in ("scene = valley", "render_scale = 0.75")],
-                         want.splitlines())
+        self.assertEqual([l for l in got if l != "scene = valley"], want.splitlines())
         lain = got.index("[lain]")
         self.assertIn("scene = valley", got[:lain])
-        self.assertIn("render_scale = 0.75", got[:lain])
         # menu menandai nilai aktif dan menampilkan ukuran sebenarnya
         log = self.log("fuzzel.log")
-        for s in ["● sea", "● Jakarta", "   Bandung", "Isi manual…", "75% — 1920x1200",
-                  "50% — 1280x800", "100% — 2560x1600", "● 12 FPS", "   24 FPS"]:
+        for s in ["● sea", "● Jakarta", "   Bandung", "Isi manual…", "● 12 FPS", "   24 FPS"]:
             self.assertIn(s, log)
-        self.assertIn("● 100%", log)                # render_scale belum ada -> 1.0
+        self.assertEqual(log.count("== "), 3)       # tiga langkah
+        self.assertNotIn("render_scale", self.read_config())
         # wallpaper lama dihentikan lewat PID, lalu dijalankan ulang
         self.wall.wait(timeout=5)
         self.assertIn("qamariah-livepaper/livepaper.py", self.log("pgrep.log"))
         self.assertEqual(self.log("setsid.log").split(), ["-f", "qamariah-livepaper"])
-        self.assertIn("valley · Bandung · 75% · 15 FPS", self.log("notify.log"))
+        self.assertIn("valley · Bandung · 15 FPS", self.log("notify.log"))
 
     def test_escape_each_step_changes_nothing(self):
-        for step in range(4):
+        for step in range(3):
             with self.subTest(step=step + 1):
                 for name in ("fuzzel.log", "setsid.log", "notify.log"):
                     p = os.path.join(self.fake, name)
@@ -292,15 +277,14 @@ class Menu(unittest.TestCase):
                 self.assertEqual(self.log("fuzzel.log").count("== "), step + 1)
 
     def test_manual_location(self):
-        r = self.run_menu("0", "12", "abc", "91,0", " -7.5 , 110.1 ", "0", "1")
+        r = self.run_menu("0", "12", "abc", "91,0", " -7.5 , 110.1 ", "1")
         self.assertEqual(r.returncode, 0, r.stderr)
         cfg = self.read_config()
         self.assertIn("lat = -7.5\n", cfg)
         self.assertIn("lon = 110.1\n", cfg)
-        self.assertIn("render_scale = 1.0\n", cfg)
         notes = self.log("notify.log")
         self.assertEqual(notes.count("Lokasi tidak valid"), 2)
-        self.assertIn("sea · -7.5, 110.1 · 100% · 12 FPS", notes)
+        self.assertIn("sea · -7.5, 110.1 · 12 FPS", notes)
 
     def test_restart_only_kills_python(self):
         """pgrep -f juga cocok dengan proses lain (mis. editor yang membuka livepaper.py)."""
@@ -308,7 +292,7 @@ class Menu(unittest.TestCase):
         try:
             with open(os.path.join(self.fake, "pids"), "a") as f:
                 f.write("%d\n" % other.pid)
-            r = self.run_menu("0", "0", "0", "1")
+            r = self.run_menu("0", "0", "1")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.wall.wait(timeout=5)
             self.assertIsNone(other.poll(), "proses non-python tidak boleh dihentikan")
@@ -318,11 +302,12 @@ class Menu(unittest.TestCase):
 
     def test_marks_numeric_values(self):
         with open(self.config, "w") as f:
-            f.write("[livepaper]\nrender_scale = 1\nfps = 15.0\n")
+            f.write("[livepaper]\nlat = -6.20\nlon = 106.80\nfps = 15.0\n")
         self.run_menu("0", "0", "ESC")
         log = self.log("fuzzel.log")
-        self.assertIn("● 100% — 2560x1600 (tajam)", log)
-        self.assertIn("   75% — 1920x1200", log)
+        self.assertIn("● Jakarta", log)
+        self.assertIn("● 15 FPS", log)
+        self.assertIn("   12 FPS", log)
 
     def test_manual_location_escape(self):
         r = self.run_menu("0", "12", "ESC")
@@ -341,7 +326,7 @@ class Menu(unittest.TestCase):
         self.assertGreaterEqual(len([l for l in text.splitlines() if l and not l.startswith("#")]), 8)
         with open(locs, "w") as f:
             f.write("# komentar\nKota A;1;2\nrusak;abc;1\n\nKota B;-3.5;100\n")
-        r = self.run_menu("0", "1", "0", "0")       # Kota B
+        r = self.run_menu("0", "1", "0")            # Kota B
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("lat = -3.5\n", self.read_config())
         self.assertNotIn("rusak", self.log("fuzzel.log"))

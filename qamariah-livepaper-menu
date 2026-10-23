@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qamariah-livepaper-menu — pilih scene, lokasi, resolusi render, dan FPS lewat fuzzel
+# qamariah-livepaper-menu — pilih scene, lokasi, dan FPS lewat fuzzel
 set -uo pipefail
 
 config_set() {
@@ -204,41 +204,6 @@ same_num() {
     awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 == b+0) }'
 }
 
-monitor_size() {
-    wlr-randr 2>/dev/null | awk '
-    {
-        if ($0 !~ /^[[:space:]]/) {
-            if (found && enabled) {
-                if (swap) { tmp = w; w = h; h = tmp }
-                printf "%dx%d\n", w, h
-                exit
-            }
-            found = 0
-            enabled = 0
-            swap = 0
-        }
-    }
-    /Enabled: yes/ { enabled = 1 }
-    /  [0-9]+x[0-9]+/ && $0 ~ /\(current\)/ {
-        split($1, dims, "x")
-        w = dims[1] + 0
-        h = dims[2] + 0
-        found = 1
-    }
-    /Transform:/ {
-        t = $2
-        swap = 0
-        if (t == "90" || t == "270" || t ~ /flipped-90/ || t ~ /flipped-270/) swap = 1
-    }
-    END {
-        if (found && enabled) {
-            if (swap) { tmp = w; w = h; h = tmp }
-            printf "%dx%d\n", w, h
-        }
-    }
-    '
-}
-
 fail() {
     notify-send -a qamariah-livepaper "Gagal menyimpan config" "$1"
     exit 1
@@ -249,15 +214,11 @@ main() {
     local LOCS="${XDG_CONFIG_HOME:-$HOME/.config}/qamariah-livepaper/locations.txt"
     local LIVEPAPER="${QLP_LIVEPAPER:-/usr/local/share/qamariah-livepaper/livepaper.py}"
 
-    local cur_scene cur_lat cur_lon cur_scale cur_fps
+    local cur_scene cur_lat cur_lon cur_fps
     cur_scene="$(config_get "$CONFIG" "scene" "sea")"
     cur_lat="$(config_get "$CONFIG" "lat" "-6.2")"
     cur_lon="$(config_get "$CONFIG" "lon" "106.8")"
-    cur_scale="$(config_get "$CONFIG" "render_scale" "1.0")"
     cur_fps="$(config_get "$CONFIG" "fps" "12")"
-
-    local msize=""
-    msize="$(monitor_size)"
 
     # Langkah 1: scene
     local scenes_raw scene_display
@@ -360,36 +321,7 @@ LOCSEOF
         cur_lon="${loc_lons[$loc_idx]}"
     fi
 
-    # Langkah 3: resolusi render
-    local scales=(1.0 0.75 0.5)
-    local scale_pcts=(100 75 50)
-    local scale_labels=""
-    local si
-    for si in "${!scales[@]}"; do
-        local desc=""
-        if [[ "$si" -eq 0 ]]; then
-            desc=" (tajam)"
-        elif [[ "$si" -eq 1 ]]; then
-            desc=" (lebih lembut)"
-        elif [[ "$si" -eq 2 ]]; then
-            desc=" (paling lembut)"
-        fi
-        if [[ -n "$msize" ]]; then
-            read -r mw mh <<< "${msize/x/ }"
-            local size
-            size="$(awk -v w="$mw" -v h="$mh" -v s="${scales[$si]}" 'BEGIN{printf "%dx%d", w*s+0.5, h*s+0.5}')"
-            scale_labels+="$(mark "$cur_scale" "${scales[$si]}" "${scale_pcts[$si]}% — ${size}${desc}")"$'\n'
-        else
-            scale_labels+="$(mark "$cur_scale" "${scales[$si]}" "${scale_pcts[$si]}%${desc}")"$'\n'
-        fi
-    done
-    scale_labels="${scale_labels%$'\n'}"
-
-    local scale_idx
-    scale_idx="$(printf '%s\n' "$scale_labels" | choose "Resolusi render")" || cancel
-    cur_scale="${scales[$scale_idx]}"
-
-    # Langkah 4: kehalusan
+    # Langkah 3: kehalusan
     local fps_options=(8 12 15 24)
     local fps_labels=""
     local k
@@ -411,7 +343,6 @@ LOCSEOF
     config_set "$CONFIG" scene "$cur_scene" || fail scene
     config_set "$CONFIG" lat "$cur_lat" || fail lat
     config_set "$CONFIG" lon "$cur_lon" || fail lon
-    config_set "$CONFIG" render_scale "$cur_scale" || fail render_scale
     config_set "$CONFIG" fps "$cur_fps" || fail fps
 
     # Restart: hanya proses python (pola -f juga cocok dengan mis. editor yang membuka livepaper.py)
@@ -442,10 +373,7 @@ LOCSEOF
         loc_label="${loc_names[$loc_idx]}"
     fi
 
-    local scale_pct
-    scale_pct="$(awk -v s="$cur_scale" 'BEGIN{printf "%d", s*100+0.5}')"
-
-    notify-send -a qamariah-livepaper "Wallpaper diperbarui" "${cur_scene} · ${loc_label} · ${scale_pct}% · ${cur_fps} FPS"
+    notify-send -a qamariah-livepaper "Wallpaper diperbarui" "${cur_scene} · ${loc_label} · ${cur_fps} FPS"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
