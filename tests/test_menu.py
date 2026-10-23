@@ -29,10 +29,22 @@ scene = jangan-diubah
 """
 
 
+# pengaman: kalau source tidak sengaja menjalankan main, perintah yang berefek
+# (fuzzel, restart wallpaper, notifikasi) dan config sungguhan tidak tersentuh
+SAFE = tempfile.mkdtemp(prefix="qlp-menu-test-")
+for _name in ("fuzzel", "pgrep", "setsid", "notify-send", "wlr-randr"):
+    with open(os.path.join(SAFE, _name), "w") as _f:
+        _f.write("#!/bin/sh\nexit 1\n")
+    os.chmod(os.path.join(SAFE, _name), 0o755)
+
+
 def bash(script, *args):
     """jalankan potongan bash setelah men-source script menu (tanpa main)."""
-    return subprocess.run(["bash", "-c", 'source "$0"; ' + script, MENU, *args],
-                          capture_output=True, text=True, timeout=10)
+    env = dict(os.environ, PATH=SAFE + os.pathsep + os.environ["PATH"], XDG_CONFIG_HOME=SAFE)
+    # $0 sengaja bukan path script: guard `BASH_SOURCE[0] == $0` tidak boleh menjalankan main
+    return subprocess.run(["bash", "-c", 'm=$1; shift; source "$m"; ' + script, "bash", MENU, *args],
+                          capture_output=True, text=True, timeout=10, env=env,
+                          stdin=subprocess.DEVNULL)
 
 
 class ConfigSet(unittest.TestCase):
@@ -208,7 +220,7 @@ class Menu(unittest.TestCase):
         with open(self.config, "w") as f:
             f.write(SAMPLE)
         # "wallpaper" yang sedang berjalan: proses milik test sendiri
-        self.wall = subprocess.Popen(["sleep", "30"])
+        self.wall = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)"])
         with open(os.path.join(self.fake, "pids"), "w") as f:
             f.write("%d\n" % self.wall.pid)
 
@@ -289,6 +301,28 @@ class Menu(unittest.TestCase):
         notes = self.log("notify.log")
         self.assertEqual(notes.count("Lokasi tidak valid"), 2)
         self.assertIn("sea · -7.5, 110.1 · 100% · 12 FPS", notes)
+
+    def test_restart_only_kills_python(self):
+        """pgrep -f juga cocok dengan proses lain (mis. editor yang membuka livepaper.py)."""
+        other = subprocess.Popen(["sleep", "30"])
+        try:
+            with open(os.path.join(self.fake, "pids"), "a") as f:
+                f.write("%d\n" % other.pid)
+            r = self.run_menu("0", "0", "0", "1")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.wall.wait(timeout=5)
+            self.assertIsNone(other.poll(), "proses non-python tidak boleh dihentikan")
+        finally:
+            other.kill()
+            other.wait()
+
+    def test_marks_numeric_values(self):
+        with open(self.config, "w") as f:
+            f.write("[livepaper]\nrender_scale = 1\nfps = 15.0\n")
+        self.run_menu("0", "0", "ESC")
+        log = self.log("fuzzel.log")
+        self.assertIn("● 100% — 2560x1600 (tajam)", log)
+        self.assertIn("   75% — 1920x1200", log)
 
     def test_manual_location_escape(self):
         r = self.run_menu("0", "12", "ESC")
