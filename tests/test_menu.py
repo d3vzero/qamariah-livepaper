@@ -95,7 +95,7 @@ class ConfigSet(unittest.TestCase):
         once = self.read()
         self.set("scene", "valley")
         self.assertEqual(self.read(), once)
-        self.assertEqual(once.count("scene = valley\n"), 1)
+        self.assertEqual(once.splitlines().count("scene = valley"), 1)
 
     def test_missing_file_and_section(self):
         self.set("fps", "24")
@@ -106,6 +106,23 @@ class ConfigSet(unittest.TestCase):
         got = self.read()
         self.assertTrue(got.startswith("# hanya komentar\n[lain]\nx = 1\n"), got)
         self.assertIn("[livepaper]\nfps = 24\n", got)
+
+    def test_missing_directory(self):
+        self.path = os.path.join(self.tmp.name, "baru", "dir", "config.ini")
+        self.set("scene", "valley")
+        self.assertEqual(self.read(), "[livepaper]\nscene = valley\n")
+
+    def test_header_with_spaces_and_duplicates(self):
+        self.write("  [livepaper]  \nfps = 1\nfps = 2\n[lain]\nfps = 3\n")
+        self.set("fps", "8")
+        self.assertEqual(self.read(), "  [livepaper]  \nfps = 8\nfps = 2\n[lain]\nfps = 3\n")
+
+    def test_no_leftover_temp_files_and_mode_kept(self):
+        self.write(SAMPLE)
+        os.chmod(self.path, 0o644)
+        self.set("fps", "8")
+        self.assertEqual(os.listdir(self.tmp.name), ["config.ini"])
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o644)
 
     def test_no_trailing_newline_and_special_values(self):
         self.write("[livepaper]\nlat = 1\nlon = 2")      # tanpa newline akhir
@@ -131,7 +148,8 @@ class LatLon(unittest.TestCase):
 
     def test_invalid(self):
         for text in ["", "abc", "-6.2", "-6.2,", ",106.8", "91,0", "0,181",
-                     "-6.2;106.8x", "1e3,2", "-6.2,106.8,3", "--1,2", "1..2,3"]:
+                     "-6.2;106.8x", "1e3,2", "-6.2,106.8,3", "--1,2", "1..2,3",
+                     "1 2,3", "-6.2,10 6.8", "- 6.2,106.8"]:
             with self.subTest(text=text):
                 self.assertNotEqual(self.check(text).returncode, 0)
 

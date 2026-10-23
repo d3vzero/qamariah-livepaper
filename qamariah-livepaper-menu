@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# qamariah-livepaper-menu — pilih scene, lokasi, resolusi render, dan FPS lewat fuzzel
+set -uo pipefail
+
+config_set() {
+    local file="$1" key="$2" value="$3"
+    local dir tmp src
+
+    dir="$(dirname -- "$file")"
+    mkdir -p -- "$dir" || return 1
+    tmp="$(mktemp "${dir}/.config_set.XXXXXX")" || return 1
+
+    src="$file"
+    if [[ -f "$src" ]]; then
+        chmod --reference="$src" -- "$tmp"      # mktemp membuat 0600; pertahankan izin lama
+    else
+        src="/dev/null"
+    fi
+
+    K="$key" V="$value" awk '
+function trim(s) {
+    gsub(/^[[:space:]]+/, "", s)
+    gsub(/[[:space:]]+$/, "", s)
+    return s
+}
+{
+    lines[NR] = $0
+    total = NR
+}
+END {
+    K = ENVIRON["K"]
+    V = ENVIRON["V"]
+
+    found_section = 0
+    section_header_line = 0
+    key_line = 0
+    in_section = 0
+
+    for (i = 1; i <= total; i++) {
+        t = trim(lines[i])
+        if (t ~ /^\[.*\]$/) {
+            header_name = substr(t, 2, length(t) - 2)
+            if (header_name == "livepaper") {
+                found_section = 1
+                section_header_line = i
+                in_section = 1
+            } else {
+                in_section = 0
+            }
+        } else if (in_section) {
+            line_copy = lines[i]
+            sub(/^[[:space:]]+/, "", line_copy)
+            if (line_copy ~ /^[#;]/) continue
+            klen = length(K)
+            if (substr(line_copy, 1, klen) == K) {
+                rest = substr(line_copy, klen + 1)
+                sub(/^[[:space:]]+/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    key_line = i
+                    break
+                }
+            }
+        }
+    }
+
+    for (i = 1; i <= total; i++) {
+        if (i == key_line) {
+            print K " = " V
+        } else {
+            print lines[i]
+        }
+        if (found_section && !key_line && i == section_header_line) {
+            print K " = " V
+        }
+    }
+    if (!found_section) {
+        print "[livepaper]"
+        print K " = " V
+    }
+}
+' "$src" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+
+    mv -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+    return 0
+}
+
+parse_latlon() {
+    local raw="$1"
+
+    local lat_part lon_part
+    lat_part="${raw%%,*}"
+    local rest="${raw#*,}"
+    lon_part="$rest"
+
+    if [[ "$rest" == "$raw" ]]; then
+        return 1
+    fi
+
+    if [[ "$lon_part" == *","* ]]; then
+        return 1
+    fi
+
+    lat_part="${lat_part#"${lat_part%%[![:space:]]*}"}"
+    lat_part="${lat_part%"${lat_part##*[![:space:]]}"}"
+    lon_part="${lon_part#"${lon_part%%[![:space:]]*}"}"
+    lon_part="${lon_part%"${lon_part##*[![:space:]]}"}"
+
+    [[ -z "$lat_part" ]] && return 1
+    [[ -z "$lon_part" ]] && return 1
+
+    local num_re='^-?[0-9]+(\.[0-9]+)?$'
+    [[ ! "$lat_part" =~ $num_re ]] && return 1
+    [[ ! "$lon_part" =~ $num_re ]] && return 1
+
+    awk -v lat="$lat_part" -v lon="$lon_part" '
+    BEGIN {
+        if (lat + 0 < -90 || lat + 0 > 90) exit 1
+        if (lon + 0 < -180 || lon + 0 > 180) exit 1
+        print lat ";" lon
+    }'
+    return $?
+}
+
+main() { :; }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
