@@ -1089,7 +1089,7 @@ def _v_reflection(ctx, x, top, bot, size, alpha, t, s):
         i += 1
 
 
-def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, fog=False):
+def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, fog=False, scale=1.0):
     """bodies: (x, y, r, alpha) matahari/bulan di langit -> pantulan di danau;
     night 0..1 dan fog -> ketebalan kabut di atas danau."""
     g = _v_geometry(W, H)
@@ -1100,7 +1100,7 @@ def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, 
         top = _v_skyline(W, H, x)                         # tertutup bukit -> tanpa pantulan
         if y < yb and y + r < top and al > 0.02:
             _v_reflection(ctx, x, yb + 0.02 * H, H, r * 1.6, al * 0.55 * lum, t, s)
-    lake_mist(ctx, W, H, t, night, 1.0 if fog else 0.0, lum)
+    lake_mist(ctx, W, H, t, night, 1.0 if fog else 0.0, lum, scale=scale)
     for kind, x, y, k, data in g["trees"]:
         (_v_willow if kind == "willow" else _v_bamboo)(ctx, x, y, k, data, t, wind, s, lum)
     if birds:
@@ -1141,6 +1141,23 @@ def _v_skyline(W, H, x):
 _V_INK = {}
 
 
+def _v_ink_size(W, seed, heavy):
+    """Ukuran sprite awan tinta — urutan rng SAMA seperti _v_ink_sprite."""
+    rng = random.Random(seed)
+    s = W / 2560
+    w = int(rng.uniform(420, 760) * s * heavy)
+    h = int(rng.uniform(110, 190) * s * heavy)
+    return w, h
+
+
+def _v_mist_size(W, H, k):
+    """Ukuran sprite kabut danau — urutan rng SAMA seperti _v_mist_sprite."""
+    rng = random.Random(900 + k)
+    w = int(W * rng.uniform(0.45, 0.8))
+    h = int(H * rng.uniform(0.04, 0.08))
+    return w, h
+
+
 def _v_ink_sprite(W, seed, heavy):
     """satu gumpalan awan: beberapa elips bergradasi lembut yang memanjang
     mendatar, tanpa garis tepi. Disimpan sebagai gambar (dibuat sekali)."""
@@ -1179,7 +1196,7 @@ def _v_ink_sprite(W, seed, heavy):
     return _V_INK[key]
 
 
-def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0):
+def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0, scale=1.0):
     """awan tinta; cover 0..1, vx = kecepatan angin di layar (px/detik)."""
     n = round(cover * 9)
     if n == 0:
@@ -1187,11 +1204,14 @@ def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0):
     heavy = 1 + 0.6 * rain
     # siang jelas, malam samar (lebih terlihat saat bulan terang)
     alpha = (0.42 * (1 - night) + night * (0.10 + 0.22 * moon_lit)) * (1 + 0.4 * rain) * lum
+    # posisi dihitung di koordinat layar penuh lalu dikali scale: tetap proporsional
+    Wf, vxf = W / scale, vx / scale
     for i in range(n):
         surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+        wf, _ = _v_ink_size(Wf, 100 + i, heavy)
         r = random.Random(500 + i)
-        span = W + w
-        x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
+        span = Wf + wf
+        x = ((r.random() * span + vxf * (0.6 + 0.5 * r.random()) * t) % span - wf) * scale
         y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
         ctx.set_source_surface(surf, x, y)
         ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())))
@@ -1222,17 +1242,20 @@ def _v_mist_sprite(W, H, k):
     return _V_MIST[key]
 
 
-def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
+def lake_mist(ctx, W, H, t, night, fog, lum=1.0, scale=1.0):
     """pita kabut yang melayang pelan di atas danau: tebal malam, tipis siang."""
     alpha = (0.05 + 0.30 * night + 0.25 * fog) * lum
     if alpha < 0.02:
         return
+    Wf = W / scale
+    Hf = H / scale
     yb = VALLEY_HORIZON * H
     for k in range(5):
         surf, w, h = _v_mist_sprite(W, H, k)
+        wf, _ = _v_mist_size(Wf, Hf, k)
         r = random.Random(950 + k)
-        span = W + w
-        x = (r.random() * span + (4 + 6 * r.random()) * (W / 2560) * t * (1 if k % 2 else -1)) % span - w
+        span = Wf + wf
+        x = ((r.random() * span + (4 + 6 * r.random()) * (Wf / 2560) * t * (1 if k % 2 else -1)) % span - wf) * scale
         y = yb + (-0.008 + 0.10 * (k / 4) ** 1.3) * H - h / 2
         ctx.set_source_surface(surf, x, y)
         ctx.paint_with_alpha(min(1.0, alpha * (1 - 0.15 * k)))
@@ -1250,9 +1273,10 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     """scene valley: satu bingkai layar penuh (langit, awan, bukit, danau, pohon, hujan).
     gen naik setiap data langit berganti (20 detik) -> langit dasar digambar ulang."""
     import cairo
+    s = cfg.get("render_scale", 1.0)
     h_sky = int(H * VALLEY_HORIZON)
     lum = round(scene_lum(a, cfg, wx), 3)
-    dx, dy = (round(v) for v in drift(t, cfg["drift"], cfg.get("render_scale", 1.0)))
+    dx, dy = (round(v) for v in drift(t, cfg["drift"], s))
     cache = _V_FRAME.setdefault((W, H), {"sky": (None, None), "static": (None, None),
                                           "frame": (None, None)})
     # kuantisasi waktu: elemen lambat diperbarui 4x/detik, elemen cepat per frame
@@ -1272,7 +1296,8 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
         c.paint()
         # 2. awan tinta (menggantikan awan garis)
         moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
-        ink_clouds(c, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), tq)
+        ink_clouds(c, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), tq,
+                   scale=s)
         # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
         skey = (lum, dx, dy)
         if cache["static"][0] != skey:
@@ -1296,7 +1321,7 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
         c.save()
         c.translate(dx, dy)
         valley_anim(c, W, H, tq, lum, wind=wx["wind"], birds=False, bodies=bodies,
-                    night=a["night"], fog=wx["fog"])
+                    night=a["night"], fog=wx["fog"], scale=s)
         c.restore()
         cache["frame"] = (key, surf)
     ctx.save()

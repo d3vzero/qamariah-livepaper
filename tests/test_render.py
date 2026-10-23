@@ -5,6 +5,8 @@ Jalankan test:
 
 Perbarui gambar acuan (generate ulang):
     UPDATE_REF=1 python3 -m unittest tests.test_render
+
+Test render_scale (0.75, 0.5) ada di kelas ScaledRender.
 """
 import os
 import subprocess
@@ -38,9 +40,14 @@ BLACK_PCT = {"sea": (95, 100), "valley": (60, 80)}
 # toleransi perbandingan dengan acuan
 MAX_DIFF_PIXELS = 0.0005   # pecahan piksel yang boleh berbeda
 MAX_CHANNEL_DIFF = 24      # selisih terbesar satu kanal (0..255)
+# render_scale < 1: filter bilinear membuat halo redup di sekitar garis tipis,
+# jadi piksel hitam berkurang. Batas: paling banyak turun sekian poin persen
+# dari render 1.0 kasus yang sama (batas atas tetap rentang scene).
+SCALES = (0.75, 0.5)
+SCALED_BLACK_DROP = 6.0
 
 
-def render(out, when, weather, scene=None, size=SIZE):
+def render(out, when, weather, scene=None, size=SIZE, scale=None):
     cmd = [
         sys.executable,
         os.path.join(ROOT, "livepaper.py"),
@@ -51,6 +58,8 @@ def render(out, when, weather, scene=None, size=SIZE):
     ]
     if scene:
         cmd += ["--scene", scene]
+    if scale is not None:
+        cmd += ["--scale", str(scale)]
     tmpconfig = tempfile.mkdtemp()
     env = dict(os.environ)
     env["TZ"] = "Asia/Jakarta"
@@ -61,6 +70,10 @@ def render(out, when, weather, scene=None, size=SIZE):
     finally:
         import shutil
         shutil.rmtree(tmpconfig, ignore_errors=True)
+
+
+def black_pct(arr):
+    return (arr == 0).all(axis=2).mean() * 100
 
 
 def load(path):
@@ -131,6 +144,69 @@ class Render(unittest.TestCase):
                                      "%s frac=%.6f > %s" % (nama, frac, MAX_DIFF_PIXELS))
                 self.assertLessEqual(worst, MAX_CHANNEL_DIFF,
                                      "%s worst=%.0f > %s" % (nama, worst, MAX_CHANNEL_DIFF))
+
+
+
+class ScaledRender(unittest.TestCase):
+    """render_scale: 1.0 identik byte per byte dengan acuan; 0.75 dan 0.5 berjalan,
+    ukuran keluaran tetap layar penuh, dan rasio piksel hitam masih wajar."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        for nama, when, weather, *scene in CASES:
+            for scale in (1.0,) + SCALES:
+                render(cls.path(nama, scale), when, weather, *scene, scale=scale)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
+
+    @classmethod
+    def path(cls, nama, scale):
+        return os.path.join(cls.tmpdir.name, "%s-%s.png" % (nama, scale))
+
+    def test_scale_1_identical_bytes(self):
+        for nama, *_ in CASES:
+            with self.subTest(nama=nama):
+                with open(self.path(nama, 1.0), "rb") as f:
+                    got = f.read()
+                with open(os.path.join(REF, "%s.png" % nama), "rb") as f:
+                    ref = f.read()
+                self.assertTrue(got == ref, "%s: --scale 1.0 tidak identik dengan acuan" % nama)
+
+    def test_scaled_size_and_black(self):
+        for nama, *args in CASES:
+            lo, hi = BLACK_PCT[args[2] if len(args) > 2 else "sea"]
+            _, _, full = load(os.path.join(REF, "%s.png" % nama))
+            base = black_pct(full)
+            for scale in SCALES:
+                with self.subTest(nama=nama, scale=scale):
+                    w, h, arr = load(self.path(nama, scale))
+                    self.assertEqual((w, h), SIZE)
+                    pct = black_pct(arr)
+                    self.assertTrue(base - SCALED_BLACK_DROP <= pct < hi,
+                                    "%s skala %s: %.2f%% piksel hitam (1.0: %.2f%%, butuh %.2f..%s%%)"
+                                    % (nama, scale, pct, base, base - SCALED_BLACK_DROP, hi))
+                    # gambar bukan hitam polos: masih ada isi
+                    self.assertGreater(100 - pct, 0.5, "%s skala %s hampir kosong" % (nama, scale))
+
+    def test_scaled_close_to_full(self):
+        """gambar kecil yang diperbesar harus mirip versi penuh (posisi proporsional):
+        bandingkan versi yang sama-sama diperkecil 16x (rata-rata blok)."""
+        def small(arr):
+            h, w = arr.shape[0] // 16 * 16, arr.shape[1] // 16 * 16
+            a = arr[:h, :w].astype(np.float32).mean(axis=2)
+            return a.reshape(h // 16, 16, w // 16, 16).mean(axis=(1, 3))
+        for nama, *_ in CASES:
+            _, _, full = load(os.path.join(REF, "%s.png" % nama))
+            ref = small(full)
+            for scale in SCALES:
+                with self.subTest(nama=nama, scale=scale):
+                    _, _, arr = load(self.path(nama, scale))
+                    diff = np.abs(small(arr) - ref)
+                    self.assertLess(diff.mean(), 3.0, "%s skala %s rata-rata selisih %.2f"
+                                    % (nama, scale, diff.mean()))
 
 
 if __name__ == "__main__":
