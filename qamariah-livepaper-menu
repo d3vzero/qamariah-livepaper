@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+# qamariah-livepaper-menu — pilih scene, lokasi, dan FPS lewat fuzzel
+set -uo pipefail
+
+config_set() {
+    local file="$1" key="$2" value="$3"
+    local dir tmp src
+
+    dir="$(dirname -- "$file")"
+    mkdir -p -- "$dir" || return 1
+    tmp="$(mktemp "${dir}/.config_set.XXXXXX")" || return 1
+
+    src="$file"
+    if [[ -f "$src" ]]; then
+        chmod --reference="$src" -- "$tmp"
+    else
+        src="/dev/null"
+    fi
+
+    K="$key" V="$value" awk '
+function trim(s) {
+    gsub(/^[[:space:]]+/, "", s)
+    gsub(/[[:space:]]+$/, "", s)
+    return s
+}
+{
+    lines[NR] = $0
+    total = NR
+}
+END {
+    K = ENVIRON["K"]
+    V = ENVIRON["V"]
+
+    found_section = 0
+    section_header_line = 0
+    key_line = 0
+    in_section = 0
+
+    for (i = 1; i <= total; i++) {
+        t = trim(lines[i])
+        if (t ~ /^\[.*\]$/) {
+            header_name = substr(t, 2, length(t) - 2)
+            if (header_name == "livepaper") {
+                found_section = 1
+                section_header_line = i
+                in_section = 1
+            } else {
+                in_section = 0
+            }
+        } else if (in_section) {
+            line_copy = lines[i]
+            sub(/^[[:space:]]+/, "", line_copy)
+            if (line_copy ~ /^[#;]/) continue
+            klen = length(K)
+            if (substr(line_copy, 1, klen) == K) {
+                rest = substr(line_copy, klen + 1)
+                sub(/^[[:space:]]+/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    key_line = i
+                    break
+                }
+            }
+        }
+    }
+
+    for (i = 1; i <= total; i++) {
+        if (i == key_line) {
+            print K " = " V
+        } else {
+            print lines[i]
+        }
+        if (found_section && !key_line && i == section_header_line) {
+            print K " = " V
+        }
+    }
+    if (!found_section) {
+        print "[livepaper]"
+        print K " = " V
+    }
+}
+' "$src" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+
+    mv -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+    return 0
+}
+
+parse_latlon() {
+    local raw="$1"
+
+    local lat_part lon_part
+    lat_part="${raw%%,*}"
+    local rest="${raw#*,}"
+    lon_part="$rest"
+
+    if [[ "$rest" == "$raw" ]]; then
+        return 1
+    fi
+
+    if [[ "$lon_part" == *","* ]]; then
+        return 1
+    fi
+
+    lat_part="${lat_part#"${lat_part%%[![:space:]]*}"}"
+    lat_part="${lat_part%"${lat_part##*[![:space:]]}"}"
+    lon_part="${lon_part#"${lon_part%%[![:space:]]*}"}"
+    lon_part="${lon_part%"${lon_part##*[![:space:]]}"}"
+
+    [[ -z "$lat_part" ]] && return 1
+    [[ -z "$lon_part" ]] && return 1
+
+    local num_re='^-?[0-9]+(\.[0-9]+)?$'
+    [[ ! "$lat_part" =~ $num_re ]] && return 1
+    [[ ! "$lon_part" =~ $num_re ]] && return 1
+
+    awk -v lat="$lat_part" -v lon="$lon_part" '
+    BEGIN {
+        if (lat + 0 < -90 || lat + 0 > 90) exit 1
+        if (lon + 0 < -180 || lon + 0 > 180) exit 1
+        print lat ";" lon
+    }'
+    return $?
+}
+
+config_get() {
+    local file="$1" key="$2" default="${3:-}"
+    if [[ ! -f "$file" ]]; then
+        printf '%s\n' "$default"
+        return 0
+    fi
+    local val
+    val="$(K="$key" awk '
+function trim(s) {
+    gsub(/^[[:space:]]+/, "", s)
+    gsub(/[[:space:]]+$/, "", s)
+    return s
+}
+{
+    lines[NR] = $0
+    total = NR
+}
+END {
+    K = ENVIRON["K"]
+    in_section = 0
+    for (i = 1; i <= total; i++) {
+        t = trim(lines[i])
+        if (t ~ /^\[.*\]$/) {
+            hn = substr(t, 2, length(t) - 2)
+            trim(hn)
+            if (hn == "livepaper") in_section = 1
+            else in_section = 0
+            continue
+        }
+        if (in_section) {
+            lc = lines[i]
+            sub(/^[[:space:]]+/, "", lc)
+            if (lc ~ /^[#;]/) continue
+            klen = length(K)
+            if (substr(lc, 1, klen) == K) {
+                rest = substr(lc, klen + 1)
+                sub(/^[[:space:]]+/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    val = substr(rest, 2)
+                    gsub(/^[[:space:]]+/, "", val)
+                    gsub(/[[:space:]]+$/, "", val)
+                    print val
+                    exit
+                }
+            }
+        }
+    }
+}
+' "$file")"
+    if [[ -z "$val" ]]; then
+        printf '%s\n' "$default"
+    else
+        printf '%s\n' "$val"
+    fi
+}
+
+choose() {
+    local prompt="$1"
+    local result
+    result="$(fuzzel --dmenu --index --no-sort --prompt "${prompt}> ")" || return 1
+    if [[ -z "$result" || ! "$result" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    printf '%s\n' "$result"
+}
+
+mark() {
+    local current="$1" value="$2" label="$3"
+    if [[ "$current" == "$value" ]] || { [[ "$value" =~ ^[0-9.]+$ ]] && same_num "$current" "$value"; }; then
+        printf '● %s\n' "$label"
+    else
+        printf '   %s\n' "$label"
+    fi
+}
+
+cancel() {
+    exit 0
+}
+
+same_num() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 == b+0) }'
+}
+
+fail() {
+    notify-send -a qamariah-livepaper "Gagal menyimpan config" "$1"
+    exit 1
+}
+
+main() {
+    local CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/qamariah-livepaper/config.ini"
+    local LOCS="${XDG_CONFIG_HOME:-$HOME/.config}/qamariah-livepaper/locations.txt"
+    local LIVEPAPER="${QLP_LIVEPAPER:-/usr/local/share/qamariah-livepaper/livepaper.py}"
+
+    local cur_scene cur_lat cur_lon cur_fps
+    cur_scene="$(config_get "$CONFIG" "scene" "sea")"
+    cur_lat="$(config_get "$CONFIG" "lat" "-6.2")"
+    cur_lon="$(config_get "$CONFIG" "lon" "106.8")"
+    cur_fps="$(config_get "$CONFIG" "fps" "12")"
+
+    # Langkah 1: scene
+    local scenes_raw scene_display
+    scenes_raw="$(python3 "$LIVEPAPER" --list-scenes)"
+    if [[ -z "$scenes_raw" ]]; then
+        notify-send -a qamariah-livepaper "Daftar scene tidak terbaca" "$LIVEPAPER"
+        exit 1
+    fi
+    scene_display=""
+    while IFS= read -r sname; do
+        local label
+        case "$sname" in
+            sea)   label="laut bergaris gelombang" ;;
+            valley) label="lukisan tinta: bukit, danau, pohon" ;;
+            *)     label="$sname" ;;
+        esac
+        scene_display+="$(mark "$cur_scene" "$sname" "$sname — $label")"$'\n'
+    done <<< "$scenes_raw"
+    scene_display="${scene_display%$'\n'}"
+
+    local scene_idx
+    scene_idx="$(printf '%s\n' "$scene_display" | choose "Scene")" || cancel
+    cur_scene="$(printf '%s\n' "$scenes_raw" | sed -n "$((scene_idx + 1))p")"
+
+    # Langkah 2: lokasi
+    if [[ ! -f "$LOCS" ]]; then
+        mkdir -p "$(dirname -- "$LOCS")"
+        cat > "$LOCS" <<'LOCSEOF'
+# Nama;lat;lon  — satu lokasi per baris (desimal; selatan & barat negatif)
+Jakarta;-6.2;106.8
+Bandung;-6.914;107.609
+Surabaya;-7.257;112.752
+Yogyakarta;-7.797;110.37
+Semarang;-6.966;110.42
+Medan;3.595;98.672
+Palembang;-2.976;104.777
+Denpasar;-8.65;115.216
+Makassar;-5.147;119.432
+Balikpapan;-1.237;116.852
+Manado;1.474;124.842
+Jayapura;-2.533;140.718
+LOCSEOF
+    fi
+
+    local loc_labels loc_names loc_lats loc_lons
+    loc_labels=()
+    loc_names=()
+    loc_lats=()
+    loc_lons=()
+    local validated
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ -z "$line" ]] && continue
+        [[ "$line" == \#* ]] && continue
+        local l_name l_lat l_lon
+        l_name="${line%%;*}"
+        local rest1="${line#*;}"
+        l_lat="${rest1%%;*}"
+        rest1="${rest1#*;}"
+        l_lon="$rest1"
+        validated="$(parse_latlon "${l_lat},${l_lon}")" || continue
+        loc_names+=("$l_name")
+        loc_lats+=("$l_lat")
+        loc_lons+=("$l_lon")
+        local marked
+        if same_num "$l_lat" "$cur_lat" && same_num "$l_lon" "$cur_lon"; then
+            marked="●"
+        else
+            marked="   "
+        fi
+        loc_labels+=("${marked} ${l_name}  (${l_lat}, ${l_lon})")
+    done < "$LOCS"
+
+    local entries_display=""
+    local i
+    for i in "${!loc_labels[@]}"; do
+        entries_display+="${loc_labels[$i]}"$'\n'
+    done
+    entries_display+="   Isi manual…"
+
+    local loc_idx
+    loc_idx="$(printf '%s\n' "$entries_display" | choose "Lokasi")" || cancel
+
+    local n_entries="${#loc_names[@]}"
+    if [[ "$loc_idx" -ge "$n_entries" ]]; then
+        local raw_input
+        while true; do
+            raw_input="$(fuzzel --dmenu --prompt-only "lat,lon> " --placeholder "${cur_lat},${cur_lon}" </dev/null)" || cancel
+            [[ -z "$raw_input" ]] && { notify-send -a qamariah-livepaper "Lokasi tidak valid" "Contoh: -6.2,106.8"; continue; }
+            validated="$(parse_latlon "$raw_input")" || {
+                notify-send -a qamariah-livepaper "Lokasi tidak valid" "Contoh: -6.2,106.8"
+                continue
+            }
+            cur_lat="${validated%%;*}"
+            cur_lon="${validated#*;}"
+            break
+        done
+    else
+        cur_lat="${loc_lats[$loc_idx]}"
+        cur_lon="${loc_lons[$loc_idx]}"
+    fi
+
+    # Langkah 3: kehalusan
+    local fps_options=(8 12 15 24)
+    local fps_labels=""
+    local k
+    for k in "${!fps_options[@]}"; do
+        case "${fps_options[$k]}" in
+            8)  fps_labels+="$(mark "$cur_fps" "8" "8 FPS — paling ringan (CPU ±⅔ dari 12 FPS)")"$'\n' ;;
+            12) fps_labels+="$(mark "$cur_fps" "12" "12 FPS — bawaan")"$'\n' ;;
+            15) fps_labels+="$(mark "$cur_fps" "15" "15 FPS — lebih halus (CPU ±1,25×)")"$'\n' ;;
+            24) fps_labels+="$(mark "$cur_fps" "24" "24 FPS — paling halus (CPU ±2×)")"$'\n' ;;
+        esac
+    done
+    fps_labels="${fps_labels%$'\n'}"
+
+    local fps_idx
+    fps_idx="$(printf '%s\n' "$fps_labels" | choose "Kehalusan")" || cancel
+    cur_fps="${fps_options[$fps_idx]}"
+
+    # Simpan config
+    config_set "$CONFIG" scene "$cur_scene" || fail scene
+    config_set "$CONFIG" lat "$cur_lat" || fail lat
+    config_set "$CONFIG" lon "$cur_lon" || fail lon
+    config_set "$CONFIG" fps "$cur_fps" || fail fps
+
+    # Restart: hanya proses python (pola -f juga cocok dengan mis. editor yang membuka livepaper.py)
+    local pids=() pid comm
+    for pid in $(pgrep -u "$(id -u)" -f 'qamariah-livepaper/livepaper.py'); do
+        [[ "$pid" == "$$" ]] && continue
+        comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
+        [[ "$comm" == python* ]] && pids+=("$pid")
+    done
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        kill "${pids[@]}" 2>/dev/null
+        local retries=0 alive
+        while [[ "$retries" -lt 30 ]]; do        # launcher menolak jalan selama instance lama masih ada
+            alive=0
+            for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+            [[ "$alive" -eq 0 ]] && break
+            sleep 0.1
+            retries=$((retries + 1))
+        done
+    fi
+    setsid -f qamariah-livepaper >/dev/null 2>&1
+
+    # Notifikasi
+    local loc_label
+    if [[ "$loc_idx" -ge "$n_entries" ]]; then
+        loc_label="${cur_lat}, ${cur_lon}"
+    else
+        loc_label="${loc_names[$loc_idx]}"
+    fi
+
+    notify-send -a qamariah-livepaper "Wallpaper diperbarui" "${cur_scene} · ${loc_label} · ${cur_fps} FPS"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

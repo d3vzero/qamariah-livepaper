@@ -29,6 +29,7 @@ Pakai:
       [--size 2560x1600] [--time "2026-10-20 19:30"]
       [--weather clear|cloudy|rain|storm|fog|sim|live]
       [--scene sea|valley]
+  qamariah-livepaper --list-scenes      daftar scene (dipakai qamariah-livepaper-menu)
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -1483,6 +1484,10 @@ def run():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args and args[0] == "--list-scenes":
+        for name in SCENES:
+            print(name)
+        sys.exit(0)
     if args and args[0] == "--preview":
         out = args[1] if len(args) > 1 else "livepaper-preview.png"
         size = args[args.index("--size") + 1] if "--size" in args else "2560x1600"
