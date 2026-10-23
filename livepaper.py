@@ -62,7 +62,7 @@ DEFAULTS = {
     "lightning": "yes",     # kilat redup saat badai
     "sky_fps": "4",         # fps langit saat ada awan (hujan memakai fps laut)
     "scene": "sea",         # sea | valley (pemandangan di bawah cakrawala)
-    "render_scale": "1.0",  # skala resolusi render: 1.0 penuh | 0.75 | 0.5
+    "render_scale": "1.0",  # 1.0 | 0.75 | 0.5: gambar kecil lalu diperbesar (lihat config.example.ini)
 }
 RENDER_SCALES = (0.5, 0.75, 1.0)
 

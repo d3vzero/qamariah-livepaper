@@ -369,8 +369,10 @@ LOCSEOF
         local desc=""
         if [[ "$si" -eq 0 ]]; then
             desc=" (tajam)"
+        elif [[ "$si" -eq 1 ]]; then
+            desc=" (lebih lembut)"
         elif [[ "$si" -eq 2 ]]; then
-            desc=" (paling ringan, sedikit lembut)"
+            desc=" (paling lembut)"
         fi
         if [[ -n "$msize" ]]; then
             read -r mw mh <<< "${msize/x/ }"
