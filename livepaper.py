@@ -383,6 +383,7 @@ class Weather:
 
 
 V_CLOUDS_MAX = 9          # jumlah awan tinta saat langit tertutup penuh (scene valley)
+RAIN_EPS = 0.05   # hujan di bawah ini: efek hujan memudar, bukan hilang mendadak
 BLEND_KEYS = ("cover", "rain", "wind", "fog", "thunder", "clouds")
 
 
@@ -595,9 +596,8 @@ def _cloud_veil(wx):
     if not wx:
         return 0.0
     cover = wx["cover"]
-    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] > 0 else 0.5)
-    if wx["fog"]:
-        veil = max(veil, 0.6)
+    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] >= RAIN_EPS else 0.5 + 0.2 * wx["rain"] / RAIN_EPS)
+    veil = max(veil, 0.6 * wx["fog"])
     return veil
 
 
@@ -720,11 +720,11 @@ def _cloud_cluster(c, ox, base, scale, r, line_al, lw):
         c.stroke()
 
 
-def _cloud_sprites(w, h, n, heavy, line_al):
+def _cloud_sprites(w, h, n, heavy, line_al, quant=False):
     """awan dirender sekali ke sprite; per frame cukup ditempel (hemat CPU)."""
     import cairo
     import random
-    key = (w, h, n, round(heavy, 2), round(line_al, 3))
+    key = (w, h, n, round(heavy, 2), round(line_al, 3), quant)
     if key in _CLOUD_CACHE:
         return _CLOUD_CACHE[key]
     lw = max(1.5, w / 1000)
@@ -776,20 +776,28 @@ def _cloud_sprites(w, h, n, heavy, line_al):
 
 def draw_clouds(ctx, w, h, a, wx, t, cfg):
     cover = wx["cover"]
-    n = round(cover * cfg["clouds_max"])
-    if n == 0:
+    n = wx.get("clouds", round(cover * cfg["clouds_max"]))
+    if n <= 0:
         return
     vx = wind_px(wx, w)
     moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
     # garis awan: terang di siang hari, redup di malam (lebih jelas saat bulan terang)
     line_al = 0.75 * (1 - a["night"]) + a["night"] * (0.28 + 0.35 * moon_lit)
-    line_al *= 1.0 if wx["rain"] == 0 else 0.8
+    line_al *= 1.0 - 0.2 * min(1.0, wx["rain"] / RAIN_EPS)
     heavy = 1 + 0.35 * wx["rain"]
-    for surf, ox, oy, x0, cy, speed_f, scale in _cloud_sprites(w, h, n, heavy, line_al):
+    quant = "_mo" in wx
+    if quant:
+        heavy, line_al = round(heavy, 2), round(line_al, 3)   # saat transisi: sprite tidak dibuat ulang tiap frame
+    sprites = _cloud_sprites(w, h, math.ceil(n), heavy, line_al, quant)
+    for i, (surf, ox, oy, x0, cy, speed_f, scale) in enumerate(sprites):
         span = w + 7 * scale
         cx = (x0 * span + vx * speed_f * t) % span - 3.5 * scale
         ctx.set_source_surface(surf, cx - ox, cy - oy)
-        ctx.paint()
+        fade = min(1.0, n - i)                       # awan terakhir memudar masuk/keluar
+        if fade >= 1.0:
+            ctx.paint()
+        else:
+            ctx.paint_with_alpha(fade)
 
 
 _RAIN_CACHE = []
@@ -830,7 +838,7 @@ def draw_lightning(ctx, wx, t, cfg):
         return
     k = math.floor(t / 6.0)                         # tiap ~6 detik ada peluang kilat
     if _frac(math.sin(k * 91.7) * 5531.3) < 0.25 and _frac(t / 6.0) * 6.0 < 0.18:
-        ctx.set_source_rgba(1, 1, 1, 0.07)
+        ctx.set_source_rgba(1, 1, 1, 0.07 * wx["thunder"])
         ctx.paint()
 
 
@@ -851,7 +859,7 @@ def scene_lum(a, cfg, wx):
     saat mendung, dan saat kabut."""
     moon_up = moon_visible(a, cfg)
     lum = 1.0 - a["night"] * (0.38 - 0.25 * (a["illum"] if moon_up else 0))
-    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - (0.3 if wx["fog"] else 0)
+    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - 0.3 * wx["fog"]
     return lum
 
 
@@ -1181,7 +1189,7 @@ def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, 
         top = _v_skyline(W, H, x)                         # tertutup bukit -> tanpa pantulan
         if y < yb and y + r < top and al > 0.02:
             _v_reflection(ctx, x, yb + 0.02 * H, H, r * 1.6, al * 0.55 * lum, t, s)
-    lake_mist(ctx, W, H, t, night, 1.0 if fog else 0.0, lum)
+    lake_mist(ctx, W, H, t, night, float(fog), lum)
     for kind, x, y, k, data in g["trees"]:
         (_v_willow if kind == "willow" else _v_bamboo)(ctx, x, y, k, data, t, wind, s, lum)
     if birds:
@@ -1222,11 +1230,11 @@ def _v_skyline(W, H, x):
 _V_INK = {}
 
 
-def _v_ink_sprite(W, seed, heavy):
+def _v_ink_sprite(W, seed, heavy, quant=False):
     """satu gumpalan awan: beberapa elips bergradasi lembut yang memanjang
     mendatar, tanpa garis tepi. Disimpan sebagai gambar (dibuat sekali)."""
     import cairo
-    key = (W, seed, round(heavy, 1))
+    key = (W, seed, round(heavy, 1), quant)
     if key in _V_INK:
         return _V_INK[key]
     rng = random.Random(seed)
@@ -1256,26 +1264,33 @@ def _v_ink_sprite(W, seed, heavy):
         c.move_to(x0, y); c.line_to(min(w * 0.9, x0 + rng.uniform(0.2, 0.4) * w), y + rng.uniform(-2, 2) * s)
         c.set_source_rgba(1, 1, 1, rng.uniform(0.15, 0.35)); c.set_line_width(rng.uniform(1, 3) * s)
         c.stroke()
+    if len(_V_INK) > 200:
+        _V_INK.clear()
     _V_INK[key] = (surf, w, h)
     return _V_INK[key]
 
 
-def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0):
-    """awan tinta; cover 0..1, vx = kecepatan angin di layar (px/detik)."""
-    n = round(cover * 9)
-    if n == 0:
+def ink_clouds(ctx, W, h_sky, wx, night, moon_lit, t, lum=1.0):
+    """awan tinta; wx = cuaca (boleh hasil transisi)."""
+    n = wx.get("clouds", round(wx["cover"] * V_CLOUDS_MAX))
+    if n <= 0:
         return
+    rain = wx["rain"]
+    vx = wind_px(wx, W)
     heavy = 1 + 0.6 * rain
+    quant = "_mo" in wx
+    if quant:
+        heavy = round(heavy, 1)                     # saat transisi: sprite tidak dibuat ulang tiap frame
     # siang jelas, malam samar (lebih terlihat saat bulan terang)
     alpha = (0.42 * (1 - night) + night * (0.10 + 0.22 * moon_lit)) * (1 + 0.4 * rain) * lum
-    for i in range(n):
-        surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+    for i in range(math.ceil(n)):
+        surf, w, h = _v_ink_sprite(W, 100 + i, heavy, quant)
         r = random.Random(500 + i)
         span = W + w
         x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
         y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
         ctx.set_source_surface(surf, x, y)
-        ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())))
+        ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i))
 
 
 # ── kabut di atas danau ──────────────────────────────────────────────────────
@@ -1320,8 +1335,10 @@ def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
 
 
 def valley_birds_on(a, wx):
-    """burung terbang saat matahari terbit, tidak mendung, tidak hujan."""
-    return sun_up(a) and wx["cover"] < 0.5 and wx["rain"] == 0
+    """kekuatan 0..1 burung: terbang saat matahari terbit, tidak mendung, tidak hujan."""
+    if not sun_up(a):
+        return 0.0
+    return max(0.0, min(1.0, (0.5 - wx["cover"]) / 0.1)) * (1.0 - min(1.0, wx["rain"] / RAIN_EPS))
 
 
 _V_FRAME = {}
@@ -1345,15 +1362,16 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
         c.set_source_rgb(0, 0, 0)
         c.paint()
         # 1. langit dasar (bintang, planet, matahari, bulan): cache per gen
-        if cache["sky"][0] != gen:
+        skykey = (gen, round(_cloud_veil(wx), 2))   # veil berubah halus saat transisi
+        if cache["sky"][0] != skykey:
             sky_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, W, h_sky)
             draw_sky_base(cairo.Context(sky_surf), W, h_sky, a, t, cfg, wx)
-            cache["sky"] = (gen, sky_surf)
+            cache["sky"] = (skykey, sky_surf)
         c.set_source_surface(cache["sky"][1], 0, 0)
         c.paint()
         # 2. awan tinta (menggantikan awan garis)
         moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
-        ink_clouds(c, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), tq)
+        ink_clouds(c, W, h_sky, wx, a["night"], moon_lit, tq)
         # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
         skey = (lum, dx, dy)
         if cache["static"][0] != skey:
@@ -1385,10 +1403,11 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     ctx.set_source_surface(cache["frame"][1], 0, 0)
     ctx.paint()
     ctx.restore()
-    if valley_birds_on(a, wx):                       # burung: per frame (kepak sayap cepat)
+    birds = valley_birds_on(a, wx)
+    if birds > 0:                                    # burung: per frame (kepak sayap cepat)
         ctx.save()
         ctx.translate(dx, dy)
-        valley_birds(ctx, W, H, t, lum)
+        valley_birds(ctx, W, H, t, lum * birds)
         ctx.restore()
     # 5. hujan
     draw_rain(ctx, W, 0, H, H, wx, t)
