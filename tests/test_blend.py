@@ -143,6 +143,21 @@ class TestWeatherBlend(unittest.TestCase):
             self.assertLess(abs(diff), 1e-6,
                             "t=%d: diff=%.10f" % (t, diff))
 
+    def test_7b_motion_no_overshoot(self):
+        """kecepatan saat transisi tidak melebihi angin tercepat + koreksi < 1 periode."""
+        blend = WeatherBlend(self.cfg)
+        blend.set(_A, 1000)
+        blend.set(_B, 2000)
+        mo = blend.get(2000.5)["_mo"]
+        track = lambda wx, t: wind_px(wx, 2560) * 1.3 * t / 3000.0
+        speed = lambda wx: abs(track(wx, 1) - track(wx, 0))
+        vmax = max(speed(_A), speed(_B)) + 1.5 / 100 * 0.5 + 1e-9
+        for k in range(200):
+            t = 2000 + k * 0.5
+            d = mo.pos("k", track, t + 0.5) - mo.pos("k", track, t)
+            v = abs((d + 0.5) % 1 - 0.5) / 0.5          # posisi dipakai modulo 1 periode
+            self.assertLessEqual(v, vmax, "t=%.1f kecepatan %.5f > %.5f" % (t, v, vmax))
+
     def test_8_motion_interruption(self):
         C = dict(WEATHER_FIXED["clear"], wind=40, wind_from=270,
                  cover=0.1, rain=0.0, thunder=False, fog=False)

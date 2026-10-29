@@ -411,14 +411,19 @@ class _Motion:
         if self.prev is None or t >= self.t1:
             return track(self.wx, t)
         if key not in self.memo:
+            # kecepatan berpindah halus va -> vb (bukan posisi yang dicampur: itu membuat
+            # benda melaju terlalu cepat); d0 = sisa kurang dari 1 periode agar di t1 tepat
+            # di lintasan wx
             pa0 = self.prev.pos(key, track, self.t0)
-            pb0 = track(self.wx, self.t0)
-            d0 = (pb0 - pa0 + 0.5) % 1 - 0.5
-            self.memo[key] = (pa0, pb0, d0)
-        pa0, pb0, d0 = self.memo[key]
-        pa = self.prev.pos(key, track, t)
-        pb = track(self.wx, t)
-        return pa + _smooth(0, 1, (t - self.t0) / self.dur) * (d0 + (pb - pb0) - (pa - pa0))
+            va = self.prev.pos(key, track, self.t0 + 1) - pa0
+            vb = track(self.wx, self.t0 + 1) - track(self.wx, self.t0)
+            end = self.prev.pos(key, track, self.t1) + (vb - va) * self.dur / 2
+            d0 = (track(self.wx, self.t1) - end + 0.5) % 1 - 0.5
+            self.memo[key] = (va, vb, d0)
+        va, vb, d0 = self.memo[key]
+        x = (t - self.t0) / self.dur
+        s = _smooth(0, 1, x)
+        return self.prev.pos(key, track, t) + (vb - va) * self.dur * (x ** 3 - x ** 4 / 2) + s * d0
 
 
 class WeatherBlend:
@@ -789,9 +794,15 @@ def draw_clouds(ctx, w, h, a, wx, t, cfg):
     if quant:
         heavy, line_al = round(heavy, 2), round(line_al, 3)   # saat transisi: sprite tidak dibuat ulang tiap frame
     sprites = _cloud_sprites(w, h, math.ceil(n), heavy, line_al, quant)
+    mo = wx.get("_mo")
     for i, (surf, ox, oy, x0, cy, speed_f, scale) in enumerate(sprites):
         span = w + 7 * scale
-        cx = (x0 * span + vx * speed_f * t) % span - 3.5 * scale
+        if mo:
+            base = scale / heavy
+            track = lambda m, t, x0=x0, k=speed_f, base=base: x0 + wind_px(m, w) * k * t / (w + 7 * base * (1 + 0.35 * m["rain"]))
+            cx = (mo.pos(("cloud", w, h, i), track, t) % 1.0) * span - 3.5 * scale
+        else:
+            cx = (x0 * span + vx * speed_f * t) % span - 3.5 * scale
         ctx.set_source_surface(surf, cx - ox, cy - oy)
         fade = min(1.0, n - i)                       # awan terakhir memudar masuk/keluar
         if fade >= 1.0:
@@ -823,11 +834,17 @@ def draw_rain(ctx, w, y0, y1, h_total, wx, t):
     sx = vx / vy * length
     ctx.set_line_width(1.2)
     ctx.set_source_rgba(1, 1, 1, 0.10 + 0.14 * wx["rain"])
+    mo = wx.get("_mo")
+    if mo:
+        shift = (mo.pos(("rain", w), lambda m, t: wind_px(m, w) * 2.5 * t / w, t) % 1.0) * w
     for rx, ry, sp in _rain_drops(n):
         y = (ry * h_total + vy * sp * t) % h_total
         if y < y0 - length or y >= y1:
             continue
-        x = (rx * w + vx * t) % w
+        if mo:
+            x = (rx * w + shift) % w
+        else:
+            x = (rx * w + vx * t) % w
         ctx.move_to(x, y - y0)
         ctx.line_to(x + sx, y - y0 + length)
     ctx.stroke()
@@ -874,9 +891,10 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     step = max(6.0, w / 360)
     wx = wx or WEATHER_FIXED["clear"]
     # 0 tenang … 1 badai: dari angin dan hujan
-    rough = min(1.0, max(0.0, (wx["wind"] - 10) / 25) + 0.5 * wx["rain"])
+    rough = sea_rough(wx)
     amp0 = h * 0.035 * a["wave_amp"] * (1 + 1.1 * rough)
     direc = a["wave_dir"]
+    mo = wx.get("_mo")
     ctx.set_line_cap(1)  # ROUND
     moon_up = moon_visible(a, cfg)
     lum = scene_lum(a, cfg, wx)
@@ -890,7 +908,12 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
         ph0 = i * 1.37
         ctx.set_source_rgba(1, 1, 1, (0.16 + 0.50 * u) * lum)
         ctx.set_line_width(0.8 + 1.6 * u)
-        ph = 2 * math.pi * (X - v * t) / lam + ph0
+        if mo:
+            c = direc * (6 + 34 * u) / lam
+            q = mo.pos(("wave", w, i), lambda m, t, c=c: c * (1 + 1.2 * sea_rough(m)) * t, t) % 1.0
+            ph = 2 * math.pi * (X / lam - q) + ph0
+        else:
+            ph = 2 * math.pi * (X - v * t) / lam + ph0
         ys = y0 + amp * (0.65 * np.sin(ph) + 0.35 * np.sin(1.7 * ph + i)
                          + 0.30 * rough * np.sin(3.3 * ph + 2.1 * t + i))   # riak badai
         ys = ys.tolist()
@@ -1278,19 +1301,34 @@ def ink_clouds(ctx, W, h_sky, wx, night, moon_lit, t, lum=1.0):
     rain = wx["rain"]
     vx = wind_px(wx, W)
     heavy = 1 + 0.6 * rain
-    quant = "_mo" in wx
-    if quant:
-        heavy = round(heavy, 1)                     # saat transisi: sprite tidak dibuat ulang tiap frame
     # siang jelas, malam samar (lebih terlihat saat bulan terang)
     alpha = (0.42 * (1 - night) + night * (0.10 + 0.22 * moon_lit)) * (1 + 0.4 * rain) * lum
+    mo = wx.get("_mo")
+    if mo:                                          # saat transisi: campur dua sprite heavy terdekat
+        lo = math.floor(heavy * 10) / 10            # (kelipatan 0,1), bukan dibuat ulang tiap frame
+        f = heavy * 10 - lo * 10
+        mix = [(hq, wq) for hq, wq in ((round(lo, 1), 1 - f), (round(lo + 0.1, 1), f)) if wq > 1e-6]
     for i in range(math.ceil(n)):
-        surf, w, h = _v_ink_sprite(W, 100 + i, heavy, quant)
         r = random.Random(500 + i)
-        span = W + w
-        x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
-        y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
-        ctx.set_source_surface(surf, x, y)
-        ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i))
+        if not mo:
+            surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+            span = W + w
+            x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
+            y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
+            ctx.set_source_surface(surf, x, y)
+            ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i))
+            continue
+        x0 = r.random()
+        k = 0.6 + 0.5 * r.random()
+        yr = r.random()
+        al = min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i)
+        track = lambda m, t, i=i, x0=x0, k=k: x0 + wind_px(m, W) * k * t / (
+            W + _v_ink_sprite(W, 100 + i, round(1 + 0.6 * m["rain"], 1), True)[1])
+        q = mo.pos(("ink", W, i), track, t) % 1.0
+        for hq, wq in mix:
+            surf, w, h = _v_ink_sprite(W, 100 + i, hq, True)
+            ctx.set_source_surface(surf, q * (W + w) - w, (0.06 + 0.62 * yr) * h_sky - h / 2)
+            ctx.paint_with_alpha(al * wq)
 
 
 # ── kabut di atas danau ──────────────────────────────────────────────────────

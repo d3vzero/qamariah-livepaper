@@ -1,10 +1,12 @@
 """Test transisi cuaca halus (WeatherBlend) melalui render — tanpa lonjakan piksel.
 
-Diuji:
-  - Saat transisi A→B, setiap langkah berurutan hanya mengubah pecahan piksel
-    kecil (≤ limit = 1.5 × steady + 0.002).
-  - Frame awal identik dengan render A; frame akhir identik dengan render B.
-  - Ada lonjakan aktual di awal transisi (kontrol: jump(A, B) > limit).
+Diuji (scene sea dan valley; badai -> cerah, lalu angin berbalik arah):
+  - Tiap langkah 1 detik selama transisi, perubahan rata-rata kecerahan per blok
+    32x32 (tanpa sekitar matahari/bulan) tidak melebihi 1.5 x perubahan saat
+    cuaca tetap + 2. Gerak biasa hampir tidak terhitung; awan/hujan yang muncul,
+    hilang, atau melompat mendadak terhitung besar.
+  - Kontrol: perpindahan langsung A -> B memang melewati batas itu.
+  - Frame awal identik dengan render A, frame akhir identik dengan render B.
 
 Cara jalan:
     python3 -m unittest tests.test_transition
@@ -39,7 +41,7 @@ PAIRS = [
      dict(WEATHER_FIXED["cloudy"], wind=30, wind_from=270)),
 ]
 SCENES = ("sea", "valley")
-JUMP = 32
+BLOCK = 32   # lonjakan = perubahan rata-rata kecerahan per blok BLOCKxBLOCK piksel
 
 
 _gen_counter = itertools.count(1)   # gen unik per render: cache bingkai valley tidak dipakai ulang
@@ -57,9 +59,30 @@ def render(cfg, a, wx, t):
     return arr
 
 
-def jump(f1, f2):
-    frac = (np.abs(f1.astype(np.int16) - f2.astype(np.int16)).max(axis=2) > JUMP).mean()
-    return frac
+def body_mask(cfg, a):
+    """piksel di sekitar matahari/bulan: awan yang lewat di depannya wajar berubah cepat."""
+    w, h = SIZE
+    h_sky = int(h * (livepaper.VALLEY_HORIZON if cfg["scene"] == "valley" else cfg["horizon"]))
+    r_sun, r_moon = livepaper.radii(w, a, cfg)
+    yy, xx = np.mgrid[0:h, 0:w]
+    mask = np.zeros((h, w), bool)
+    for up, body, r in ((livepaper.sun_up(a), a["sun"], r_sun),
+                        (livepaper.moon_visible(a, cfg), a["moon"], r_moon)):
+        if up:
+            x, y = livepaper.project(*body, w, h_sky)
+            mask |= (xx - x) ** 2 + (yy - y) ** 2 < (3 * r) ** 2
+    return mask
+
+
+def jump(f1, f2, mask):
+    """selisih terbesar rata-rata kecerahan blok: gerak kecil hampir tidak terhitung,
+    benda yang muncul/hilang mendadak terhitung besar."""
+    g1, g2 = f1.max(axis=2).astype(float), f2.max(axis=2).astype(float)
+    g2[mask] = g1[mask]
+    h, w = g1.shape
+    blocks = lambda g: g[:h // BLOCK * BLOCK, :w // BLOCK * BLOCK].reshape(
+        h // BLOCK, BLOCK, w // BLOCK, BLOCK).mean(axis=(1, 3))
+    return np.abs(blocks(g1) - blocks(g2)).max()
 
 
 class Transition(unittest.TestCase):
@@ -75,14 +98,15 @@ class Transition(unittest.TestCase):
                     now = datetime.datetime.strptime(WHEN, "%Y-%m-%d %H:%M").astimezone()
                     a = livepaper.full_state(now, cfg)
                     t0 = now.timestamp()
+                    mask = body_mask(cfg, a)
 
                     # Batas: variasi steady antar frame identik
-                    steady = max(jump(render(cfg, a, X, t0 + k), render(cfg, a, X, t0 + k + 1))
-                                 for X in (A, B) for k in range(3))
-                    limit = 1.5 * steady + 0.002
+                    steady = max(jump(render(cfg, a, X, t0 + k), render(cfg, a, X, t0 + k + 1), mask)
+                                 for X in (A, B) for k in range(5))
+                    limit = 1.5 * steady + 2
 
                     # Kontrol: transisi langsung (tanpa blend) harus melonjak
-                    A_jump_B = jump(render(cfg, a, A, t0), render(cfg, a, B, t0 + 1))
+                    A_jump_B = jump(render(cfg, a, A, t0), render(cfg, a, B, t0 + 1), mask)
                     self.assertGreater(A_jump_B, limit,
                                        "kontrol gagal: jump(A,B)=%.6f ≤ limit %.6f"
                                        % (A_jump_B, limit))
@@ -105,7 +129,7 @@ class Transition(unittest.TestCase):
                                             "frame awal != render A")
 
                         if prev is not None:
-                            j = jump(prev, f)
+                            j = jump(prev, f, mask)
                             if j > worst[0]:
                                 worst = (j, k)
                         prev = f
