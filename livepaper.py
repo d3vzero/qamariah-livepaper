@@ -382,6 +382,99 @@ class Weather:
         return weather_sim(now)                      # sim, atau cadangan live
 
 
+V_CLOUDS_MAX = 9          # jumlah awan tinta saat langit tertutup penuh (scene valley)
+BLEND_KEYS = ("cover", "rain", "wind", "fog", "thunder", "clouds")
+
+
+def sea_rough(wx):
+    """0 tenang ... 1 badai: dari angin dan hujan."""
+    return min(1.0, max(0.0, (wx["wind"] - 10) / 25) + 0.5 * wx["rain"])
+
+
+def _moved(a, b):
+    """True kalau gerak (angin, gelombang, ukuran awan) berubah cukup besar."""
+    return (abs(wind_px(a, 2560) - wind_px(b, 2560)) > 1.0
+            or abs(sea_rough(a) - sea_rough(b)) > 0.03
+            or abs(a["rain"] - b["rain"]) > 0.03)
+
+
+class _Motion:
+    """lintasan posisi benda yang digeser angin; berpindah halus dari lintasan prev
+    ke lintasan cuaca wx, lalu tepat sama dengan lintasan wx (modulo 1 periode)."""
+
+    def __init__(self, wx, prev, t0, dur):
+        self.wx, self.prev, self.t0, self.t1, self.dur = wx, prev, t0, t0 + dur, dur
+        self.memo = {}
+
+    def pos(self, key, track, t):
+        if self.prev is None or t >= self.t1:
+            return track(self.wx, t)
+        if key not in self.memo:
+            pa0 = self.prev.pos(key, track, self.t0)
+            pb0 = track(self.wx, self.t0)
+            d0 = (pb0 - pa0 + 0.5) % 1 - 0.5
+            self.memo[key] = (pa0, pb0, d0)
+        pa0, pb0, d0 = self.memo[key]
+        pa = self.prev.pos(key, track, t)
+        pb = track(self.wx, t)
+        return pa + _smooth(0, 1, (t - self.t0) / self.dur) * (d0 + (pb - pb0) - (pa - pa0))
+
+
+class WeatherBlend:
+    def __init__(self, cfg):
+        self.dur = cfg["weather_transition"]
+        self.m = V_CLOUDS_MAX if cfg["scene"] == "valley" else cfg["clouds_max"]
+        self.node = None
+
+    def _target(self, wx):
+        out = dict(wx)
+        out["fog"] = float(out["fog"])
+        out["thunder"] = float(out["thunder"])
+        out["clouds"] = round(wx["cover"] * self.m)
+        return out
+
+    def set(self, wx, now):
+        tgt = self._target(wx)
+        if self.node is not None:
+            tk = BLEND_KEYS + ("wind_from",)
+            if all(tgt[k] == self.node[1][k] for k in tk):
+                return
+        if self.node is None:
+            self.node = (None, tgt, now, _Motion(tgt, None, now, self.dur))
+        else:
+            start = self.get(now)
+            mo = self.node[3]
+            m = mo
+            while m is not None:                     # lintasan yang sudah selesai: lepas rantainya
+                if now >= m.t1:
+                    m.prev = None
+                    m.memo.clear()
+                m = m.prev
+            if _moved(mo.wx, tgt):
+                mo = _Motion(tgt, mo, now, self.dur)
+            self.node = (start, tgt, now, mo)
+
+    def get(self, now):
+        if self.node is None:
+            return None
+        start, tgt, t0, mo = self.node
+        if start is not None and now <= t0:
+            return start
+        if start is None or self.dur <= 0 or now >= t0 + self.dur:
+            out = dict(tgt)
+        else:
+            s = _smooth(0, 1, (now - t0) / self.dur)
+            out = dict(tgt)
+            for k in BLEND_KEYS:
+                out[k] = start[k] + (tgt[k] - start[k]) * s
+            d = (tgt["wind_from"] - start["wind_from"] + 180) % 360 - 180
+            out["wind_from"] = start["wind_from"] + d * s
+        out.pop("_mo", None)
+        if mo.wx is not tgt or (mo.prev is not None and now < mo.t1):
+            out["_mo"] = mo                          # tanpa "_mo": rumus lama, identik tanpa transisi
+        return out
+
+
 # ── gambar ──────────────────────────────────────────────────────────────────
 def drift(t, on):
     if not on:
