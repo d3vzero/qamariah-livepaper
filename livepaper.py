@@ -1529,13 +1529,14 @@ def run():
 
     cfg = load_config()
     weather = Weather(cfg)
-    state = {"a": full_state(datetime.now().astimezone(), cfg), "wx": None, "gen": 0}
+    blend = WeatherBlend(cfg)                        # data baru -> transisi halus
+    state = {"a": full_state(datetime.now().astimezone(), cfg), "gen": 0}
 
     def refresh():
         now = datetime.now().astimezone()
         state["a"] = full_state(now, cfg)
         weather.poll()
-        state["wx"] = weather.get(now)
+        blend.set(weather.get(now), time.time())
         state["gen"] += 1                            # langit dasar perlu digambar ulang
         return True
     refresh()
@@ -1571,14 +1572,16 @@ def run():
         if render:
             area = Gtk.DrawingArea()
             area.set_hexpand(True); area.set_vexpand(True)
-            area.set_draw_func(lambda _a, c, w, h: render(c, w, h, state["a"], state["wx"] or
-                                                          WEATHER_FIXED["clear"], time.time(), cfg, state["gen"]))
+            def draw_full(_a, c, w, h):
+                t = time.time()
+                render(c, w, h, state["a"], blend.get(t), t, cfg, state["gen"])
+            area.set_draw_func(draw_full)
             win.set_child(area)
             last_f = {"t": 0}
 
             def tick_full(_w, clock):
                 now = clock.get_frame_time()
-                wx = state["wx"] or WEATHER_FIXED["clear"]
+                wx = blend.get(time.time())
                 fast = valley_birds_on(state["a"], wx) or wx["rain"] > 0 or wx["thunder"]
                 period = 1_000_000 / (cfg["fps"] if fast else VALLEY_SLOW_FPS)
                 if now - last_f["t"] >= period:
@@ -1597,19 +1600,21 @@ def run():
 
         def draw_sky_cb(_a, c, w, h):
             t = time.time()
-            key = (w, h, state["gen"])
+            wx = blend.get(t)
+            key = (w, h, state["gen"], round(_cloud_veil(wx), 2))   # veil berubah halus saat transisi
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
                 surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"])
+                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, wx)
                 cache["surf"], cache["key"] = surf, key
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
-            if state["wx"]:
-                draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, geo.height)
+            draw_sky_overlay(c, w, h, state["a"], wx, t, cfg, geo.height)
 
         sky.set_draw_func(draw_sky_cb)
-        sea.set_draw_func(lambda _a, c, w, h: draw_sea(c, w, h, state["a"], time.time(), cfg,
-                                                       sky.get_height(), state["wx"]))
+        def draw_sea_cb(_a, c, w, h):
+            t = time.time()
+            draw_sea(c, w, h, state["a"], t, cfg, sky.get_height(), blend.get(t))
+        sea.set_draw_func(draw_sea_cb)
         box.append(sky); box.append(sea)
         win.set_child(box)
 
@@ -1620,10 +1625,10 @@ def run():
             if now - last["sea"] >= 1_000_000 / cfg["fps"]:
                 last["sea"] = now
                 sea.queue_draw()
-            wx = state["wx"] or {}
-            if wx.get("rain", 0) > 0 or wx.get("thunder"):
+            wx = blend.get(time.time())
+            if wx["rain"] > 0 or wx["thunder"]:
                 sky_us = 1_000_000 / cfg["fps"]
-            elif wx.get("cover", 0) > 0 or wx.get("fog"):
+            elif wx["cover"] > 0 or wx["fog"] or "_mo" in wx:
                 sky_us = 1_000_000 / cfg["sky_fps"]
             else:
                 sky_us = None                        # cerah: cukup saat data berganti
