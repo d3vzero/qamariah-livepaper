@@ -60,6 +60,7 @@ DEFAULTS = {
     "clouds_max": "16",     # jumlah awan saat mendung penuh
     "lightning": "yes",     # kilat redup saat badai
     "sky_fps": "4",         # fps langit saat ada awan (hujan memakai fps laut)
+    "weather_transition": "180",  # detik, durasi transisi halus data cuaca (0 = langsung)
     "scene": "sea",         # sea | valley (pemandangan di bawah cakrawala)
 }
 
@@ -97,6 +98,7 @@ def load_config():
         "clouds_max": max(0, min(40, c.getint("clouds_max"))),
         "lightning": c.getboolean("lightning"),
         "sky_fps": max(1, min(30, c.getint("sky_fps"))),
+        "weather_transition": max(0, c.getint("weather_transition")),
         "scene": scene,
     }
 
@@ -1308,6 +1310,21 @@ SCENES = {
 }
 
 
+def draw_frame(ctx, w, h, a, wx, t, cfg, gen=0):
+    """satu bingkai layar penuh untuk scene cfg['scene'] (dipakai preview dan test)."""
+    h_sky = int(h * cfg["horizon"])
+    if SCENES[cfg["scene"]] is not None:
+        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg, gen)
+    else:
+        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
+        ctx.save()
+        ctx.translate(0, h_sky)
+        ctx.rectangle(0, 0, w, h - h_sky)
+        ctx.clip()
+        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
+        ctx.restore()
+
+
 # ── preview (tanpa GTK) ─────────────────────────────────────────────────────
 def full_state(now, cfg):
     a = astro(now, cfg["lat"], cfg["lon"])
@@ -1333,19 +1350,9 @@ def preview(out, size, when, weather=None, scene=None):
     wthr.poll(background=False)
     wx = wthr.get(now)
     t = now.timestamp()
-    h_sky = int(h * cfg["horizon"])
     surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
     ctx = cairo.Context(surf)
-    if SCENES[cfg["scene"]] is not None:
-        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg)
-    else:
-        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
-        ctx.save()
-        ctx.translate(0, h_sky)
-        ctx.rectangle(0, 0, w, h - h_sky)
-        ctx.clip()
-        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
-        ctx.restore()
+    draw_frame(ctx, w, h, a, wx, t, cfg)
     surf.write_to_png(out)
     deg = lambda r: r / D2R
     print(f"{out}: {now:%Y-%m-%d %H:%M}  matahari alt {deg(a['sun'][0]):5.1f}° az {deg(a['sun'][1]):5.1f}°, "
