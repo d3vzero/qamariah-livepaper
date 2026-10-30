@@ -30,6 +30,9 @@ Pakai:
       [--weather clear|cloudy|rain|storm|fog|sim|live]
       [--scene sea|valley]
   qamariah-livepaper --list-scenes      daftar scene (dipakai qamariah-livepaper-menu)
+  qamariah-livepaper --demo-weather storm,clear,rain,fog,cloudy [--demo-period 60]
+                                        uji transisi: cuaca bergantian tiap DETIK
+                                        (tanpa data live; durasi = weather_transition)
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -1517,7 +1520,8 @@ def preview(out, size, when, weather=None, scene=None):
 
 
 # ── GTK4 + layer-shell ──────────────────────────────────────────────────────
-def run():
+def run(demo=None, period=60):
+    """demo: daftar kondisi WEATHER_FIXED yang bergantian tiap period detik (uji visual)."""
     import cairo
     import gi
     gi.require_version("Gtk", "4.0")
@@ -1535,10 +1539,21 @@ def run():
     def refresh():
         now = datetime.now().astimezone()
         state["a"] = full_state(now, cfg)
-        weather.poll()
-        blend.set(weather.get(now), time.time())
+        if not demo:
+            weather.poll()
+            blend.set(weather.get(now), time.time())
         state["gen"] += 1                            # langit dasar perlu digambar ulang
         return True
+
+    def demo_next():
+        state["demo"] = (state.get("demo", -1) + 1) % len(demo)
+        name = demo[state["demo"]]
+        print("qamariah-livepaper: demo cuaca -> %s (%s)" % (name, datetime.now().strftime("%H:%M:%S")),
+              file=sys.stderr, flush=True)
+        blend.set(dict(WEATHER_FIXED[name], source=name), time.time())
+        return True
+    if demo:
+        demo_next()
     refresh()
 
     css = Gtk.CssProvider()
@@ -1555,6 +1570,8 @@ def run():
         for idx in range(monitors.get_n_items()):
             make_window(app, monitors.get_item(idx))
         GLib.timeout_add_seconds(20, refresh)
+        if demo:
+            GLib.timeout_add_seconds(period, demo_next)
 
     def make_window(app, monitor):
         win = Gtk.ApplicationWindow(application=app)
@@ -1657,5 +1674,15 @@ if __name__ == "__main__":
         wthr = args[args.index("--weather") + 1] if "--weather" in args else None
         scn = args[args.index("--scene") + 1] if "--scene" in args else None
         preview(out, size, when, wthr, scn)
+    elif "--demo-weather" in args:
+        demo = [w.strip().lower() for w in args[args.index("--demo-weather") + 1].split(",") if w.strip()]
+        bad = [w for w in demo if w not in WEATHER_FIXED]
+        if not demo or bad:
+            sys.exit("--demo-weather: kondisi tidak dikenal %s (pilih dari %s)"
+                     % (",".join(bad) or "(kosong)", ",".join(WEATHER_FIXED)))
+        period = int(args[args.index("--demo-period") + 1]) if "--demo-period" in args else 60
+        if period < 1:
+            sys.exit("--demo-period harus >= 1 detik")
+        run(demo, period)
     else:
         run()
