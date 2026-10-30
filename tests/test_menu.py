@@ -241,7 +241,7 @@ class Menu(unittest.TestCase):
             return f.read()
 
     def test_full_flow(self):
-        r = self.run_menu("1", "1", "2")            # valley, Bandung, 15 FPS
+        r = self.run_menu("0", "1", "1", "2")       # atur wallpaper: valley, Bandung, 15 FPS
         self.assertEqual(r.returncode, 0, r.stderr)
         want = (SAMPLE.replace("lat = -6.2\n", "lat = -6.914\n")
                       .replace("lon   =   106.8\n", "lon = 107.609\n")
@@ -254,7 +254,7 @@ class Menu(unittest.TestCase):
         log = self.log("fuzzel.log")
         for s in ["● sea", "● Jakarta", "   Bandung", "Isi manual…", "● 12 FPS", "   24 FPS"]:
             self.assertIn(s, log)
-        self.assertEqual(log.count("== "), 3)       # tiga langkah
+        self.assertEqual(log.count("== "), 4)       # pilihan utama + tiga langkah
         self.assertNotIn("render_scale", self.read_config())
         # wallpaper lama dihentikan lewat PID, lalu dijalankan ulang
         self.wall.wait(timeout=5)
@@ -263,7 +263,7 @@ class Menu(unittest.TestCase):
         self.assertIn("valley · Bandung · 15 FPS", self.log("notify.log"))
 
     def test_escape_each_step_changes_nothing(self):
-        for step in range(3):
+        for step in range(4):
             with self.subTest(step=step + 1):
                 for name in ("fuzzel.log", "setsid.log", "notify.log"):
                     p = os.path.join(self.fake, name)
@@ -277,7 +277,7 @@ class Menu(unittest.TestCase):
                 self.assertEqual(self.log("fuzzel.log").count("== "), step + 1)
 
     def test_manual_location(self):
-        r = self.run_menu("0", "12", "abc", "91,0", " -7.5 , 110.1 ", "1")
+        r = self.run_menu("0", "0", "12", "abc", "91,0", " -7.5 , 110.1 ", "1")
         self.assertEqual(r.returncode, 0, r.stderr)
         cfg = self.read_config()
         self.assertIn("lat = -7.5\n", cfg)
@@ -292,7 +292,7 @@ class Menu(unittest.TestCase):
         try:
             with open(os.path.join(self.fake, "pids"), "a") as f:
                 f.write("%d\n" % other.pid)
-            r = self.run_menu("0", "0", "1")
+            r = self.run_menu("0", "0", "0", "1")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.wall.wait(timeout=5)
             self.assertIsNone(other.poll(), "proses non-python tidak boleh dihentikan")
@@ -303,14 +303,14 @@ class Menu(unittest.TestCase):
     def test_marks_numeric_values(self):
         with open(self.config, "w") as f:
             f.write("[livepaper]\nlat = -6.20\nlon = 106.80\nfps = 15.0\n")
-        self.run_menu("0", "0", "ESC")
+        self.run_menu("0", "0", "0", "ESC")
         log = self.log("fuzzel.log")
         self.assertIn("● Jakarta", log)
         self.assertIn("● 15 FPS", log)
         self.assertIn("   12 FPS", log)
 
     def test_manual_location_escape(self):
-        r = self.run_menu("0", "12", "ESC")
+        r = self.run_menu("0", "0", "12", "ESC")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_config(), SAMPLE)
         self.assertEqual(self.log("setsid.log"), "")
@@ -319,17 +319,69 @@ class Menu(unittest.TestCase):
         locs = os.path.join(self.xdg, "qamariah-livepaper", "locations.txt")
         self.run_menu("ESC")
         self.assertFalse(os.path.exists(locs), "langkah 1 dibatalkan: belum perlu dibuat")
-        self.run_menu("0", "ESC")
+        self.run_menu("0", "0", "ESC")
         with open(locs) as f:
             text = f.read()
         self.assertIn("Jakarta;-6.2;106.8", text)
         self.assertGreaterEqual(len([l for l in text.splitlines() if l and not l.startswith("#")]), 8)
         with open(locs, "w") as f:
             f.write("# komentar\nKota A;1;2\nrusak;abc;1\n\nKota B;-3.5;100\n")
-        r = self.run_menu("0", "1", "0")            # Kota B
+        r = self.run_menu("0", "0", "1", "0")       # Kota B
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("lat = -3.5\n", self.read_config())
         self.assertNotIn("rusak", self.log("fuzzel.log"))
+
+
+    def start_wall(self, *args):
+        """ganti "wallpaper" palsu dengan proses python berargumen args (seperti livepaper.py)."""
+        self.wall.kill()
+        self.wall.wait()
+        self.wall = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", *args])
+        with open(os.path.join(self.fake, "pids"), "w") as f:
+            f.write("%d\n" % self.wall.pid)
+
+    def test_demo_options_restart_with_args(self):
+        for answer, args, note in [
+                ("1", ["--demo-weather", "storm,clear,rain,fog,cloudy", "--demo-period", "120"],
+                 "Demo cuaca dimulai storm, clear, rain, fog, cloudy · 120 detik per kondisi"),
+                ("2", ["--demo-weather", "storm,clear", "--demo-period", "60"],
+                 "Demo cuaca dimulai badai ⇄ cerah · 60 detik per kondisi"),
+                ("3", [], "Demo cuaca dimatikan")]:
+            with self.subTest(answer=answer):
+                self.start_wall()
+                for name in ("fuzzel.log", "setsid.log", "notify.log"):
+                    p = os.path.join(self.fake, name)
+                    if os.path.exists(p):
+                        os.remove(p)
+                r = self.run_menu(answer)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.wall.wait(timeout=5)               # wallpaper lama dihentikan lewat PID
+                self.assertEqual(self.log("setsid.log").split(), ["-f", "qamariah-livepaper", *args])
+                self.assertIn(note, self.log("notify.log"))
+                self.assertEqual(self.log("fuzzel.log").count("== "), 1)
+                self.assertEqual(self.read_config(), SAMPLE, "demo tidak disimpan ke config")
+
+    def test_marks_running_demo(self):
+        for args, marked in [
+                ([], None),
+                (["--demo-weather", "storm,clear,rain,fog,cloudy", "--demo-period", "120"], "semua kondisi"),
+                (["--demo-weather", "storm,clear"], "badai ⇄ cerah"),             # periode bawaan 60
+                (["--demo-weather", "storm,clear", "--demo-period", "120"], None),
+                (["--demo-weather", "storm,clear,rain,fog,cloudy"], None)]:
+            with self.subTest(args=args):
+                self.start_wall(*args)
+                p = os.path.join(self.fake, "fuzzel.log")
+                if os.path.exists(p):
+                    os.remove(p)
+                self.run_menu("ESC")
+                log = self.log("fuzzel.log")
+                self.assertIn("Atur wallpaper", log)
+                self.assertIn("Matikan demo", log)
+                for label in ("semua kondisi", "badai ⇄ cerah"):
+                    mark = "●" if label == marked else "  "
+                    self.assertIn("%s Demo cuaca: %s" % (mark, label), log)
+                self.assertEqual(log.count("●"), 1 if marked else 0)
+                self.assertIsNone(self.wall.poll(), "batal: wallpaper tidak boleh dihentikan")
 
 
 if __name__ == "__main__":
