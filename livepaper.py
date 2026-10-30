@@ -32,7 +32,9 @@ Pakai:
   qamariah-livepaper --list-scenes      daftar scene (dipakai qamariah-livepaper-menu)
   qamariah-livepaper --demo-weather storm,clear,rain,fog,cloudy [--demo-period 60]
                                         uji transisi: cuaca bergantian tiap DETIK
-                                        (tanpa data live; durasi = weather_transition)
+                                        (tanpa data live; durasi transisi =
+                                        min(weather_transition, 0.4 x demo-period)
+                                        supaya selesai sebelum kondisi berikutnya)
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -1519,6 +1521,11 @@ def preview(out, size, when, weather=None, scene=None):
           f"{', badai' if wx['thunder'] else ''}{', kabut' if wx['fog'] else ''}")
 
 
+def demo_transition(transition, period):
+    """durasi transisi mode demo: selesai sebelum kondisi berikutnya datang."""
+    return min(transition, period * 0.4)
+
+
 # ── GTK4 + layer-shell ──────────────────────────────────────────────────────
 def run(demo=None, period=60):
     """demo: daftar kondisi WEATHER_FIXED yang bergantian tiap period detik (uji visual)."""
@@ -1532,6 +1539,8 @@ def run(demo=None, period=60):
     from gi.repository import Gtk4LayerShell as Layer
 
     cfg = load_config()
+    if demo:
+        cfg["weather_transition"] = demo_transition(cfg["weather_transition"], period)
     weather = Weather(cfg)
     blend = WeatherBlend(cfg)                        # data baru -> transisi halus
     state = {"a": full_state(datetime.now().astimezone(), cfg), "gen": 0}

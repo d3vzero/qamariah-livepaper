@@ -176,5 +176,25 @@ class TestWeatherBlend(unittest.TestCase):
         self.assertLess(abs(diff), 1e-6, "t=2140 tidak ≡ track(C,2140) mod 1")
 
 
+
+class TestDemoTransition(unittest.TestCase):
+    def test_capped_to_40_percent_of_period(self):
+        for transition, period, want in [(180, 120, 48), (180, 60, 24), (10, 60, 10),
+                                         (24, 60, 24), (0, 60, 0), (180, 1, 0.4)]:
+            with self.subTest(transition=transition, period=period):
+                got = livepaper.demo_transition(transition, period)
+                self.assertAlmostEqual(got, want)
+                self.assertLess(got, period)
+
+    def test_blend_done_before_next_condition(self):
+        cfg = livepaper.load_config()
+        cfg["weather_transition"] = livepaper.demo_transition(180, 60)
+        blend = WeatherBlend(cfg)
+        blend.set(_A, 0)
+        blend.set(_B, 1000)
+        self.assertNotEqual(blend.get(1000 + 12), blend.get(1000 + 1000))   # masih transisi
+        self.assertEqual(blend.get(1000 + 60), blend.get(1000 + 1000))
+
+
 if __name__ == "__main__":
     unittest.main()
