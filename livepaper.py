@@ -30,6 +30,9 @@ Pakai:
       [--weather clear|cloudy|rain|storm|fog|sim|live]
       [--scene sea|valley]
   qamariah-livepaper --list-scenes      daftar scene (dipakai qamariah-livepaper-menu)
+  qamariah-livepaper --demo-weather storm,clear,rain,fog,cloudy [--demo-period 60]
+                                        uji transisi: cuaca bergantian tiap DETIK
+                                        (tanpa data live; durasi = weather_transition)
 Config: ~/.config/qamariah-livepaper/config.ini (lihat config.example.ini)
 """
 import configparser
@@ -60,6 +63,7 @@ DEFAULTS = {
     "clouds_max": "16",     # jumlah awan saat mendung penuh
     "lightning": "yes",     # kilat redup saat badai
     "sky_fps": "4",         # fps langit saat ada awan (hujan memakai fps laut)
+    "weather_transition": "180",  # detik, durasi transisi halus data cuaca (0 = langsung)
     "scene": "sea",         # sea | valley (pemandangan di bawah cakrawala)
 }
 
@@ -97,6 +101,7 @@ def load_config():
         "clouds_max": max(0, min(40, c.getint("clouds_max"))),
         "lightning": c.getboolean("lightning"),
         "sky_fps": max(1, min(30, c.getint("sky_fps"))),
+        "weather_transition": max(0, c.getint("weather_transition")),
         "scene": scene,
     }
 
@@ -380,6 +385,105 @@ class Weather:
         return weather_sim(now)                      # sim, atau cadangan live
 
 
+V_CLOUDS_MAX = 9          # jumlah awan tinta saat langit tertutup penuh (scene valley)
+RAIN_EPS = 0.05   # hujan di bawah ini: efek hujan memudar, bukan hilang mendadak
+BLEND_KEYS = ("cover", "rain", "wind", "fog", "thunder", "clouds")
+
+
+def sea_rough(wx):
+    """0 tenang ... 1 badai: dari angin dan hujan."""
+    return min(1.0, max(0.0, (wx["wind"] - 10) / 25) + 0.5 * wx["rain"])
+
+
+def _moved(a, b):
+    """True kalau gerak (angin, gelombang, ukuran awan) berubah cukup besar."""
+    return (abs(wind_px(a, 2560) - wind_px(b, 2560)) > 1.0
+            or abs(sea_rough(a) - sea_rough(b)) > 0.03
+            or abs(a["rain"] - b["rain"]) > 0.03)
+
+
+class _Motion:
+    """lintasan posisi benda yang digeser angin; berpindah halus dari lintasan prev
+    ke lintasan cuaca wx, lalu tepat sama dengan lintasan wx (modulo 1 periode)."""
+
+    def __init__(self, wx, prev, t0, dur):
+        self.wx, self.prev, self.t0, self.t1, self.dur = wx, prev, t0, t0 + dur, dur
+        self.memo = {}
+
+    def pos(self, key, track, t):
+        if self.prev is None or t >= self.t1:
+            return track(self.wx, t)
+        if key not in self.memo:
+            # kecepatan berpindah halus va -> vb (bukan posisi yang dicampur: itu membuat
+            # benda melaju terlalu cepat); d0 = sisa kurang dari 1 periode agar di t1 tepat
+            # di lintasan wx
+            pa0 = self.prev.pos(key, track, self.t0)
+            va = self.prev.pos(key, track, self.t0 + 1) - pa0
+            vb = track(self.wx, self.t0 + 1) - track(self.wx, self.t0)
+            end = self.prev.pos(key, track, self.t1) + (vb - va) * self.dur / 2
+            d0 = (track(self.wx, self.t1) - end + 0.5) % 1 - 0.5
+            self.memo[key] = (va, vb, d0)
+        va, vb, d0 = self.memo[key]
+        x = (t - self.t0) / self.dur
+        s = _smooth(0, 1, x)
+        return self.prev.pos(key, track, t) + (vb - va) * self.dur * (x ** 3 - x ** 4 / 2) + s * d0
+
+
+class WeatherBlend:
+    def __init__(self, cfg):
+        self.dur = cfg["weather_transition"]
+        self.m = V_CLOUDS_MAX if cfg["scene"] == "valley" else cfg["clouds_max"]
+        self.node = None
+
+    def _target(self, wx):
+        out = dict(wx)
+        out["fog"] = float(out["fog"])
+        out["thunder"] = float(out["thunder"])
+        out["clouds"] = round(wx["cover"] * self.m)
+        return out
+
+    def set(self, wx, now):
+        tgt = self._target(wx)
+        if self.node is not None:
+            tk = BLEND_KEYS + ("wind_from",)
+            if all(tgt[k] == self.node[1][k] for k in tk):
+                return
+        if self.node is None:
+            self.node = (None, tgt, now, _Motion(tgt, None, now, self.dur))
+        else:
+            start = self.get(now)
+            mo = self.node[3]
+            m = mo
+            while m is not None:                     # lintasan yang sudah selesai: lepas rantainya
+                if now >= m.t1:
+                    m.prev = None
+                    m.memo.clear()
+                m = m.prev
+            if _moved(mo.wx, tgt):
+                mo = _Motion(tgt, mo, now, self.dur)
+            self.node = (start, tgt, now, mo)
+
+    def get(self, now):
+        if self.node is None:
+            return None
+        start, tgt, t0, mo = self.node
+        if start is not None and now <= t0:
+            return start
+        if start is None or self.dur <= 0 or now >= t0 + self.dur:
+            out = dict(tgt)
+        else:
+            s = _smooth(0, 1, (now - t0) / self.dur)
+            out = dict(tgt)
+            for k in BLEND_KEYS:
+                out[k] = start[k] + (tgt[k] - start[k]) * s
+            d = (tgt["wind_from"] - start["wind_from"] + 180) % 360 - 180
+            out["wind_from"] = start["wind_from"] + d * s
+        out.pop("_mo", None)
+        if mo.wx is not tgt or (mo.prev is not None and now < mo.t1):
+            out["_mo"] = mo                          # tanpa "_mo": rumus lama, identik tanpa transisi
+        return out
+
+
 # ── gambar ──────────────────────────────────────────────────────────────────
 def drift(t, on):
     if not on:
@@ -500,9 +604,8 @@ def _cloud_veil(wx):
     if not wx:
         return 0.0
     cover = wx["cover"]
-    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] > 0 else 0.5)
-    if wx["fog"]:
-        veil = max(veil, 0.6)
+    veil = max(0.0, (cover - 0.6) / 0.4) ** 1.5 * (0.7 if wx["rain"] >= RAIN_EPS else 0.5 + 0.2 * wx["rain"] / RAIN_EPS)
+    veil = max(veil, 0.6 * wx["fog"])
     return veil
 
 
@@ -625,11 +728,11 @@ def _cloud_cluster(c, ox, base, scale, r, line_al, lw):
         c.stroke()
 
 
-def _cloud_sprites(w, h, n, heavy, line_al):
+def _cloud_sprites(w, h, n, heavy, line_al, quant=False):
     """awan dirender sekali ke sprite; per frame cukup ditempel (hemat CPU)."""
     import cairo
     import random
-    key = (w, h, n, round(heavy, 2), round(line_al, 3))
+    key = (w, h, n, round(heavy, 2), round(line_al, 3), quant)
     if key in _CLOUD_CACHE:
         return _CLOUD_CACHE[key]
     lw = max(1.5, w / 1000)
@@ -681,20 +784,34 @@ def _cloud_sprites(w, h, n, heavy, line_al):
 
 def draw_clouds(ctx, w, h, a, wx, t, cfg):
     cover = wx["cover"]
-    n = round(cover * cfg["clouds_max"])
-    if n == 0:
+    n = wx.get("clouds", round(cover * cfg["clouds_max"]))
+    if n <= 0:
         return
     vx = wind_px(wx, w)
     moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
     # garis awan: terang di siang hari, redup di malam (lebih jelas saat bulan terang)
     line_al = 0.75 * (1 - a["night"]) + a["night"] * (0.28 + 0.35 * moon_lit)
-    line_al *= 1.0 if wx["rain"] == 0 else 0.8
+    line_al *= 1.0 - 0.2 * min(1.0, wx["rain"] / RAIN_EPS)
     heavy = 1 + 0.35 * wx["rain"]
-    for surf, ox, oy, x0, cy, speed_f, scale in _cloud_sprites(w, h, n, heavy, line_al):
+    quant = "_mo" in wx
+    if quant:
+        heavy, line_al = round(heavy, 2), round(line_al, 3)   # saat transisi: sprite tidak dibuat ulang tiap frame
+    sprites = _cloud_sprites(w, h, math.ceil(n), heavy, line_al, quant)
+    mo = wx.get("_mo")
+    for i, (surf, ox, oy, x0, cy, speed_f, scale) in enumerate(sprites):
         span = w + 7 * scale
-        cx = (x0 * span + vx * speed_f * t) % span - 3.5 * scale
+        if mo:
+            base = scale / heavy
+            track = lambda m, t, x0=x0, k=speed_f, base=base: x0 + wind_px(m, w) * k * t / (w + 7 * base * (1 + 0.35 * m["rain"]))
+            cx = (mo.pos(("cloud", w, h, i), track, t) % 1.0) * span - 3.5 * scale
+        else:
+            cx = (x0 * span + vx * speed_f * t) % span - 3.5 * scale
         ctx.set_source_surface(surf, cx - ox, cy - oy)
-        ctx.paint()
+        fade = min(1.0, n - i)                       # awan terakhir memudar masuk/keluar
+        if fade >= 1.0:
+            ctx.paint()
+        else:
+            ctx.paint_with_alpha(fade)
 
 
 _RAIN_CACHE = []
@@ -720,11 +837,17 @@ def draw_rain(ctx, w, y0, y1, h_total, wx, t):
     sx = vx / vy * length
     ctx.set_line_width(1.2)
     ctx.set_source_rgba(1, 1, 1, 0.10 + 0.14 * wx["rain"])
+    mo = wx.get("_mo")
+    if mo:
+        shift = (mo.pos(("rain", w), lambda m, t: wind_px(m, w) * 2.5 * t / w, t) % 1.0) * w
     for rx, ry, sp in _rain_drops(n):
         y = (ry * h_total + vy * sp * t) % h_total
         if y < y0 - length or y >= y1:
             continue
-        x = (rx * w + vx * t) % w
+        if mo:
+            x = (rx * w + shift) % w
+        else:
+            x = (rx * w + vx * t) % w
         ctx.move_to(x, y - y0)
         ctx.line_to(x + sx, y - y0 + length)
     ctx.stroke()
@@ -735,7 +858,7 @@ def draw_lightning(ctx, wx, t, cfg):
         return
     k = math.floor(t / 6.0)                         # tiap ~6 detik ada peluang kilat
     if _frac(math.sin(k * 91.7) * 5531.3) < 0.25 and _frac(t / 6.0) * 6.0 < 0.18:
-        ctx.set_source_rgba(1, 1, 1, 0.07)
+        ctx.set_source_rgba(1, 1, 1, 0.07 * wx["thunder"])
         ctx.paint()
 
 
@@ -756,7 +879,7 @@ def scene_lum(a, cfg, wx):
     saat mendung, dan saat kabut."""
     moon_up = moon_visible(a, cfg)
     lum = 1.0 - a["night"] * (0.38 - 0.25 * (a["illum"] if moon_up else 0))
-    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - (0.3 if wx["fog"] else 0)
+    lum *= 1 - 0.45 * max(0.0, (wx["cover"] - 0.5) / 0.5) - 0.3 * wx["fog"]
     return lum
 
 
@@ -771,9 +894,10 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     step = max(6.0, w / 360)
     wx = wx or WEATHER_FIXED["clear"]
     # 0 tenang … 1 badai: dari angin dan hujan
-    rough = min(1.0, max(0.0, (wx["wind"] - 10) / 25) + 0.5 * wx["rain"])
+    rough = sea_rough(wx)
     amp0 = h * 0.035 * a["wave_amp"] * (1 + 1.1 * rough)
     direc = a["wave_dir"]
+    mo = wx.get("_mo")
     ctx.set_line_cap(1)  # ROUND
     moon_up = moon_visible(a, cfg)
     lum = scene_lum(a, cfg, wx)
@@ -787,7 +911,12 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
         ph0 = i * 1.37
         ctx.set_source_rgba(1, 1, 1, (0.16 + 0.50 * u) * lum)
         ctx.set_line_width(0.8 + 1.6 * u)
-        ph = 2 * math.pi * (X - v * t) / lam + ph0
+        if mo:
+            c = direc * (6 + 34 * u) / lam
+            q = mo.pos(("wave", w, i), lambda m, t, c=c: c * (1 + 1.2 * sea_rough(m)) * t, t) % 1.0
+            ph = 2 * math.pi * (X / lam - q) + ph0
+        else:
+            ph = 2 * math.pi * (X - v * t) / lam + ph0
         ys = y0 + amp * (0.65 * np.sin(ph) + 0.35 * np.sin(1.7 * ph + i)
                          + 0.30 * rough * np.sin(3.3 * ph + 2.1 * t + i))   # riak badai
         ys = ys.tolist()
@@ -1086,7 +1215,7 @@ def valley_anim(ctx, W, H, t, lum, wind=8.0, birds=False, bodies=(), night=0.0, 
         top = _v_skyline(W, H, x)                         # tertutup bukit -> tanpa pantulan
         if y < yb and y + r < top and al > 0.02:
             _v_reflection(ctx, x, yb + 0.02 * H, H, r * 1.6, al * 0.55 * lum, t, s)
-    lake_mist(ctx, W, H, t, night, 1.0 if fog else 0.0, lum)
+    lake_mist(ctx, W, H, t, night, float(fog), lum)
     for kind, x, y, k, data in g["trees"]:
         (_v_willow if kind == "willow" else _v_bamboo)(ctx, x, y, k, data, t, wind, s, lum)
     if birds:
@@ -1127,11 +1256,11 @@ def _v_skyline(W, H, x):
 _V_INK = {}
 
 
-def _v_ink_sprite(W, seed, heavy):
+def _v_ink_sprite(W, seed, heavy, quant=False):
     """satu gumpalan awan: beberapa elips bergradasi lembut yang memanjang
     mendatar, tanpa garis tepi. Disimpan sebagai gambar (dibuat sekali)."""
     import cairo
-    key = (W, seed, round(heavy, 1))
+    key = (W, seed, round(heavy, 1), quant)
     if key in _V_INK:
         return _V_INK[key]
     rng = random.Random(seed)
@@ -1161,26 +1290,48 @@ def _v_ink_sprite(W, seed, heavy):
         c.move_to(x0, y); c.line_to(min(w * 0.9, x0 + rng.uniform(0.2, 0.4) * w), y + rng.uniform(-2, 2) * s)
         c.set_source_rgba(1, 1, 1, rng.uniform(0.15, 0.35)); c.set_line_width(rng.uniform(1, 3) * s)
         c.stroke()
+    if len(_V_INK) > 200:
+        _V_INK.clear()
     _V_INK[key] = (surf, w, h)
     return _V_INK[key]
 
 
-def ink_clouds(ctx, W, h_sky, cover, rain, night, moon_lit, vx, t, lum=1.0):
-    """awan tinta; cover 0..1, vx = kecepatan angin di layar (px/detik)."""
-    n = round(cover * 9)
-    if n == 0:
+def ink_clouds(ctx, W, h_sky, wx, night, moon_lit, t, lum=1.0):
+    """awan tinta; wx = cuaca (boleh hasil transisi)."""
+    n = wx.get("clouds", round(wx["cover"] * V_CLOUDS_MAX))
+    if n <= 0:
         return
+    rain = wx["rain"]
+    vx = wind_px(wx, W)
     heavy = 1 + 0.6 * rain
     # siang jelas, malam samar (lebih terlihat saat bulan terang)
     alpha = (0.42 * (1 - night) + night * (0.10 + 0.22 * moon_lit)) * (1 + 0.4 * rain) * lum
-    for i in range(n):
-        surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+    mo = wx.get("_mo")
+    if mo:                                          # saat transisi: campur dua sprite heavy terdekat
+        lo = math.floor(heavy * 10) / 10            # (kelipatan 0,1), bukan dibuat ulang tiap frame
+        f = heavy * 10 - lo * 10
+        mix = [(hq, wq) for hq, wq in ((round(lo, 1), 1 - f), (round(lo + 0.1, 1), f)) if wq > 1e-6]
+    for i in range(math.ceil(n)):
         r = random.Random(500 + i)
-        span = W + w
-        x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
-        y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
-        ctx.set_source_surface(surf, x, y)
-        ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())))
+        if not mo:
+            surf, w, h = _v_ink_sprite(W, 100 + i, heavy)
+            span = W + w
+            x = (r.random() * span + vx * (0.6 + 0.5 * r.random()) * t) % span - w
+            y = (0.06 + 0.62 * r.random()) * h_sky - h / 2
+            ctx.set_source_surface(surf, x, y)
+            ctx.paint_with_alpha(min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i))
+            continue
+        x0 = r.random()
+        k = 0.6 + 0.5 * r.random()
+        yr = r.random()
+        al = min(1.0, alpha * (0.7 + 0.5 * r.random())) * min(1.0, n - i)
+        track = lambda m, t, i=i, x0=x0, k=k: x0 + wind_px(m, W) * k * t / (
+            W + _v_ink_sprite(W, 100 + i, round(1 + 0.6 * m["rain"], 1), True)[1])
+        q = mo.pos(("ink", W, i), track, t) % 1.0
+        for hq, wq in mix:
+            surf, w, h = _v_ink_sprite(W, 100 + i, hq, True)
+            ctx.set_source_surface(surf, q * (W + w) - w, (0.06 + 0.62 * yr) * h_sky - h / 2)
+            ctx.paint_with_alpha(al * wq)
 
 
 # ── kabut di atas danau ──────────────────────────────────────────────────────
@@ -1225,8 +1376,10 @@ def lake_mist(ctx, W, H, t, night, fog, lum=1.0):
 
 
 def valley_birds_on(a, wx):
-    """burung terbang saat matahari terbit, tidak mendung, tidak hujan."""
-    return sun_up(a) and wx["cover"] < 0.5 and wx["rain"] == 0
+    """kekuatan 0..1 burung: terbang saat matahari terbit, tidak mendung, tidak hujan."""
+    if not sun_up(a):
+        return 0.0
+    return max(0.0, min(1.0, (0.5 - wx["cover"]) / 0.1)) * (1.0 - min(1.0, wx["rain"] / RAIN_EPS))
 
 
 _V_FRAME = {}
@@ -1250,15 +1403,16 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
         c.set_source_rgb(0, 0, 0)
         c.paint()
         # 1. langit dasar (bintang, planet, matahari, bulan): cache per gen
-        if cache["sky"][0] != gen:
+        skykey = (gen, round(_cloud_veil(wx), 2))   # veil berubah halus saat transisi
+        if cache["sky"][0] != skykey:
             sky_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, W, h_sky)
             draw_sky_base(cairo.Context(sky_surf), W, h_sky, a, t, cfg, wx)
-            cache["sky"] = (gen, sky_surf)
+            cache["sky"] = (skykey, sky_surf)
         c.set_source_surface(cache["sky"][1], 0, 0)
         c.paint()
         # 2. awan tinta (menggantikan awan garis)
         moon_lit = a["illum"] if (a["moon"][0] > 0 and a["night"] > 0) else 0
-        ink_clouds(c, W, h_sky, wx["cover"], wx["rain"], a["night"], moon_lit, wind_px(wx, W), tq)
+        ink_clouds(c, W, h_sky, wx, a["night"], moon_lit, tq)
         # 3. bukit, batu, danau: gambar transparan, dicat setelah awan (bukit menutupi awan & bintang)
         skey = (lum, dx, dy)
         if cache["static"][0] != skey:
@@ -1290,10 +1444,11 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     ctx.set_source_surface(cache["frame"][1], 0, 0)
     ctx.paint()
     ctx.restore()
-    if valley_birds_on(a, wx):                       # burung: per frame (kepak sayap cepat)
+    birds = valley_birds_on(a, wx)
+    if birds > 0:                                    # burung: per frame (kepak sayap cepat)
         ctx.save()
         ctx.translate(dx, dy)
-        valley_birds(ctx, W, H, t, lum)
+        valley_birds(ctx, W, H, t, lum * birds)
         ctx.restore()
     # 5. hujan
     draw_rain(ctx, W, 0, H, H, wx, t)
@@ -1306,6 +1461,21 @@ SCENES = {
     "sea": None,
     "valley": draw_valley_frame,
 }
+
+
+def draw_frame(ctx, w, h, a, wx, t, cfg, gen=0):
+    """satu bingkai layar penuh untuk scene cfg['scene'] (dipakai preview dan test)."""
+    h_sky = int(h * cfg["horizon"])
+    if SCENES[cfg["scene"]] is not None:
+        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg, gen)
+    else:
+        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
+        ctx.save()
+        ctx.translate(0, h_sky)
+        ctx.rectangle(0, 0, w, h - h_sky)
+        ctx.clip()
+        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
+        ctx.restore()
 
 
 # ── preview (tanpa GTK) ─────────────────────────────────────────────────────
@@ -1333,19 +1503,9 @@ def preview(out, size, when, weather=None, scene=None):
     wthr.poll(background=False)
     wx = wthr.get(now)
     t = now.timestamp()
-    h_sky = int(h * cfg["horizon"])
     surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
     ctx = cairo.Context(surf)
-    if SCENES[cfg["scene"]] is not None:
-        SCENES[cfg["scene"]](ctx, w, h, a, wx, t, cfg)
-    else:
-        draw_sky(ctx, w, h_sky, a, t, cfg, wx, h)
-        ctx.save()
-        ctx.translate(0, h_sky)
-        ctx.rectangle(0, 0, w, h - h_sky)
-        ctx.clip()
-        draw_sea(ctx, w, h - h_sky, a, t, cfg, h_sky, wx)
-        ctx.restore()
+    draw_frame(ctx, w, h, a, wx, t, cfg)
     surf.write_to_png(out)
     deg = lambda r: r / D2R
     print(f"{out}: {now:%Y-%m-%d %H:%M}  matahari alt {deg(a['sun'][0]):5.1f}° az {deg(a['sun'][1]):5.1f}°, "
@@ -1360,7 +1520,8 @@ def preview(out, size, when, weather=None, scene=None):
 
 
 # ── GTK4 + layer-shell ──────────────────────────────────────────────────────
-def run():
+def run(demo=None, period=60):
+    """demo: daftar kondisi WEATHER_FIXED yang bergantian tiap period detik (uji visual)."""
     import cairo
     import gi
     gi.require_version("Gtk", "4.0")
@@ -1372,15 +1533,27 @@ def run():
 
     cfg = load_config()
     weather = Weather(cfg)
-    state = {"a": full_state(datetime.now().astimezone(), cfg), "wx": None, "gen": 0}
+    blend = WeatherBlend(cfg)                        # data baru -> transisi halus
+    state = {"a": full_state(datetime.now().astimezone(), cfg), "gen": 0}
 
     def refresh():
         now = datetime.now().astimezone()
         state["a"] = full_state(now, cfg)
-        weather.poll()
-        state["wx"] = weather.get(now)
+        if not demo:
+            weather.poll()
+            blend.set(weather.get(now), time.time())
         state["gen"] += 1                            # langit dasar perlu digambar ulang
         return True
+
+    def demo_next():
+        state["demo"] = (state.get("demo", -1) + 1) % len(demo)
+        name = demo[state["demo"]]
+        print("qamariah-livepaper: demo cuaca -> %s (%s)" % (name, datetime.now().strftime("%H:%M:%S")),
+              file=sys.stderr, flush=True)
+        blend.set(dict(WEATHER_FIXED[name], source=name), time.time())
+        return True
+    if demo:
+        demo_next()
     refresh()
 
     css = Gtk.CssProvider()
@@ -1397,6 +1570,8 @@ def run():
         for idx in range(monitors.get_n_items()):
             make_window(app, monitors.get_item(idx))
         GLib.timeout_add_seconds(20, refresh)
+        if demo:
+            GLib.timeout_add_seconds(period, demo_next)
 
     def make_window(app, monitor):
         win = Gtk.ApplicationWindow(application=app)
@@ -1414,14 +1589,16 @@ def run():
         if render:
             area = Gtk.DrawingArea()
             area.set_hexpand(True); area.set_vexpand(True)
-            area.set_draw_func(lambda _a, c, w, h: render(c, w, h, state["a"], state["wx"] or
-                                                          WEATHER_FIXED["clear"], time.time(), cfg, state["gen"]))
+            def draw_full(_a, c, w, h):
+                t = time.time()
+                render(c, w, h, state["a"], blend.get(t), t, cfg, state["gen"])
+            area.set_draw_func(draw_full)
             win.set_child(area)
             last_f = {"t": 0}
 
             def tick_full(_w, clock):
                 now = clock.get_frame_time()
-                wx = state["wx"] or WEATHER_FIXED["clear"]
+                wx = blend.get(time.time())
                 fast = valley_birds_on(state["a"], wx) or wx["rain"] > 0 or wx["thunder"]
                 period = 1_000_000 / (cfg["fps"] if fast else VALLEY_SLOW_FPS)
                 if now - last_f["t"] >= period:
@@ -1440,19 +1617,21 @@ def run():
 
         def draw_sky_cb(_a, c, w, h):
             t = time.time()
-            key = (w, h, state["gen"])
+            wx = blend.get(t)
+            key = (w, h, state["gen"], round(_cloud_veil(wx), 2))   # veil berubah halus saat transisi
             if cache["key"] != key:                  # bintang/planet/matahari/bulan: tiap 20 dtk
                 surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, state["wx"])
+                draw_sky_base(cairo.Context(surf), w, h, state["a"], t, cfg, wx)
                 cache["surf"], cache["key"] = surf, key
             c.set_source_surface(cache["surf"], 0, 0)
             c.paint()
-            if state["wx"]:
-                draw_sky_overlay(c, w, h, state["a"], state["wx"], t, cfg, geo.height)
+            draw_sky_overlay(c, w, h, state["a"], wx, t, cfg, geo.height)
 
         sky.set_draw_func(draw_sky_cb)
-        sea.set_draw_func(lambda _a, c, w, h: draw_sea(c, w, h, state["a"], time.time(), cfg,
-                                                       sky.get_height(), state["wx"]))
+        def draw_sea_cb(_a, c, w, h):
+            t = time.time()
+            draw_sea(c, w, h, state["a"], t, cfg, sky.get_height(), blend.get(t))
+        sea.set_draw_func(draw_sea_cb)
         box.append(sky); box.append(sea)
         win.set_child(box)
 
@@ -1463,10 +1642,10 @@ def run():
             if now - last["sea"] >= 1_000_000 / cfg["fps"]:
                 last["sea"] = now
                 sea.queue_draw()
-            wx = state["wx"] or {}
-            if wx.get("rain", 0) > 0 or wx.get("thunder"):
+            wx = blend.get(time.time())
+            if wx["rain"] > 0 or wx["thunder"]:
                 sky_us = 1_000_000 / cfg["fps"]
-            elif wx.get("cover", 0) > 0 or wx.get("fog"):
+            elif wx["cover"] > 0 or wx["fog"] or "_mo" in wx:
                 sky_us = 1_000_000 / cfg["sky_fps"]
             else:
                 sky_us = None                        # cerah: cukup saat data berganti
@@ -1495,5 +1674,15 @@ if __name__ == "__main__":
         wthr = args[args.index("--weather") + 1] if "--weather" in args else None
         scn = args[args.index("--scene") + 1] if "--scene" in args else None
         preview(out, size, when, wthr, scn)
+    elif "--demo-weather" in args:
+        demo = [w.strip().lower() for w in args[args.index("--demo-weather") + 1].split(",") if w.strip()]
+        bad = [w for w in demo if w not in WEATHER_FIXED]
+        if not demo or bad:
+            sys.exit("--demo-weather: kondisi tidak dikenal %s (pilih dari %s)"
+                     % (",".join(bad) or "(kosong)", ",".join(WEATHER_FIXED)))
+        period = int(args[args.index("--demo-period") + 1]) if "--demo-period" in args else 60
+        if period < 1:
+            sys.exit("--demo-period harus >= 1 detik")
+        run(demo, period)
     else:
         run()
