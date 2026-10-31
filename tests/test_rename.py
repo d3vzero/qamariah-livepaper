@@ -20,8 +20,8 @@ def tracked_files():
 
 def run_load_config(xdg):
     """Jalankan load_config() di proses terpisah; kembalikan (lat, stdout, stderr)."""
-    code = ("import sys; sys.path.insert(0, %r); import livepaper; "
-            "print(livepaper.load_config()['lat'])" % ROOT)
+    code = ("import sys; sys.path.insert(0, %r); from qlp.scenes import load_config; "
+            "print(load_config()['lat'])" % ROOT)
     env = dict(os.environ, XDG_CONFIG_HOME=xdg)
     p = subprocess.run([sys.executable, "-c", code], capture_output=True,
                        text=True, env=env, check=True)
@@ -56,13 +56,13 @@ class Rename(unittest.TestCase):
         self.assertIn("exec = %s" % NEW, src)
 
     def test_no_old_name_left(self):
-        # nama lama hanya boleh tersisa di livepaper.py, untuk path migrasi config
+        # nama lama hanya boleh tersisa di qlp/config.py, untuk path migrasi config
         for f in tracked_files():
             with open(os.path.join(ROOT, f)) as fh:
                 for n, line in enumerate(fh, 1):
                     if OLD in line:
-                        self.assertEqual(f, "livepaper.py", "%s:%d: %s" % (f, n, line))
-        with open(os.path.join(ROOT, "livepaper.py")) as fh:
+                        self.assertEqual(f, "qlp/config.py", "%s:%d: %s" % (f, n, line))
+        with open(os.path.join(ROOT, "qlp", "config.py")) as fh:
             old_lines = [l for l in fh if OLD in l]
         self.assertLessEqual(len(old_lines), 2, old_lines)
         for l in old_lines:
@@ -80,9 +80,9 @@ class Migration(unittest.TestCase):
 
     def test_neither(self):
         sys.path.insert(0, ROOT)
-        import livepaper
+        from qlp.config import DEFAULTS
         lat, out, err = run_load_config(self.xdg)
-        self.assertEqual(lat, float(livepaper.DEFAULTS["lat"]))
+        self.assertEqual(lat, float(DEFAULTS["lat"]))
         self.assertEqual((out, err), ([], []))
 
     def test_new_only(self):

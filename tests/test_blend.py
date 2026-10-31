@@ -15,8 +15,8 @@ tmpconfig = tempfile.TemporaryDirectory()
 os.environ["XDG_CONFIG_HOME"] = tmpconfig.name
 os.environ["TZ"] = "Asia/Jakarta"
 
-import livepaper
-from livepaper import WEATHER_FIXED, WeatherBlend, wind_px
+from qlp.scenes import load_config
+from qlp.weather import WEATHER_FIXED, WeatherBlend, demo_transition, wind_px
 
 _A = WEATHER_FIXED["storm"]
 _B = WEATHER_FIXED["clear"]
@@ -33,7 +33,7 @@ def _target(blend, wx):
 
 class TestWeatherBlend(unittest.TestCase):
     def setUp(self):
-        cfg = livepaper.load_config()
+        cfg = load_config()
         cfg["weather_transition"] = 100
         self.cfg = cfg
 
@@ -182,13 +182,13 @@ class TestDemoTransition(unittest.TestCase):
         for transition, period, want in [(180, 120, 48), (180, 60, 24), (10, 60, 10),
                                          (24, 60, 24), (0, 60, 0), (180, 1, 0.4)]:
             with self.subTest(transition=transition, period=period):
-                got = livepaper.demo_transition(transition, period)
+                got = demo_transition(transition, period)
                 self.assertAlmostEqual(got, want)
                 self.assertLess(got, period)
 
     def test_blend_done_before_next_condition(self):
-        cfg = livepaper.load_config()
-        cfg["weather_transition"] = livepaper.demo_transition(180, 60)
+        cfg = load_config()
+        cfg["weather_transition"] = demo_transition(180, 60)
         blend = WeatherBlend(cfg)
         blend.set(_A, 0)
         blend.set(_B, 1000)
