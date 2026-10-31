@@ -1,3 +1,4 @@
 __pycache__/
 *.png
 !tests/ref/*.png
+.claude/settings.local.json*
