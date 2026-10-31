@@ -20,8 +20,8 @@ def tracked_files():
 
 def run_load_config(xdg):
     """Jalankan load_config() di proses terpisah; kembalikan (lat, stdout, stderr)."""
-    code = ("import sys; sys.path.insert(0, %r); import livepaper; "
-            "print(livepaper.load_config()['lat'])" % ROOT)
+    code = ("import sys; sys.path.insert(0, %r); from qlp.scenes import load_config; "
+            "print(load_config()['lat'])" % ROOT)
     env = dict(os.environ, XDG_CONFIG_HOME=xdg)
     p = subprocess.run([sys.executable, "-c", code], capture_output=True,
                        text=True, env=env, check=True)
@@ -80,9 +80,9 @@ class Migration(unittest.TestCase):
 
     def test_neither(self):
         sys.path.insert(0, ROOT)
-        import livepaper
+        from qlp.config import DEFAULTS
         lat, out, err = run_load_config(self.xdg)
-        self.assertEqual(lat, float(livepaper.DEFAULTS["lat"]))
+        self.assertEqual(lat, float(DEFAULTS["lat"]))
         self.assertEqual((out, err), ([], []))
 
     def test_new_only(self):

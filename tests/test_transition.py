@@ -30,8 +30,11 @@ os.environ["XDG_CONFIG_HOME"] = tmpconfig.name
 os.environ["TZ"] = "Asia/Jakarta"
 _time.tzset()
 
-import livepaper
-from livepaper import WEATHER_FIXED, WeatherBlend
+from qlp.astro import moon_visible, project, radii, sun_up
+from qlp.render import draw_frame, full_state
+from qlp.scenes import load_config
+from qlp.scenes.valley import VALLEY_HORIZON
+from qlp.weather import WEATHER_FIXED, WeatherBlend
 
 SIZE = (1280, 800)
 WHEN = "2026-10-20 15:00"
@@ -51,7 +54,7 @@ def render(cfg, a, wx, t):
     surf = cairo.ImageSurface(cairo.FORMAT_RGB24, SIZE[0], SIZE[1])
     ctx = cairo.Context(surf)
     h, w = SIZE[1], SIZE[0]
-    livepaper.draw_frame(ctx, w, h, a, wx, t, cfg, next(_gen_counter))
+    draw_frame(ctx, w, h, a, wx, t, cfg, next(_gen_counter))
     surf.flush()
     stride = surf.get_stride()
     arr = np.frombuffer(surf.get_data(), np.uint8).reshape(h, stride)[:, :w * 4]
@@ -62,14 +65,14 @@ def render(cfg, a, wx, t):
 def body_mask(cfg, a):
     """piksel di sekitar matahari/bulan: awan yang lewat di depannya wajar berubah cepat."""
     w, h = SIZE
-    h_sky = int(h * (livepaper.VALLEY_HORIZON if cfg["scene"] == "valley" else cfg["horizon"]))
-    r_sun, r_moon = livepaper.radii(w, a, cfg)
+    h_sky = int(h * (VALLEY_HORIZON if cfg["scene"] == "valley" else cfg["horizon"]))
+    r_sun, r_moon = radii(w, a, cfg)
     yy, xx = np.mgrid[0:h, 0:w]
     mask = np.zeros((h, w), bool)
-    for up, body, r in ((livepaper.sun_up(a), a["sun"], r_sun),
-                        (livepaper.moon_visible(a, cfg), a["moon"], r_moon)):
+    for up, body, r in ((sun_up(a), a["sun"], r_sun),
+                        (moon_visible(a, cfg), a["moon"], r_moon)):
         if up:
-            x, y = livepaper.project(*body, w, h_sky)
+            x, y = project(*body, w, h_sky)
             mask |= (xx - x) ** 2 + (yy - y) ** 2 < (3 * r) ** 2
     return mask
 
@@ -90,13 +93,13 @@ class Transition(unittest.TestCase):
         for scene in SCENES:
             for pair_name, A, B in PAIRS:
                 with self.subTest(scene=scene, pair=pair_name):
-                    cfg = livepaper.load_config()
+                    cfg = load_config()
                     cfg["lightning"] = False
                     cfg["scene"] = scene
                     dur = cfg["weather_transition"]
 
                     now = datetime.datetime.strptime(WHEN, "%Y-%m-%d %H:%M").astimezone()
-                    a = livepaper.full_state(now, cfg)
+                    a = full_state(now, cfg)
                     t0 = now.timestamp()
                     mask = body_mask(cfg, a)
 

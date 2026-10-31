@@ -12,13 +12,17 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# --- Setup environment sebelum import livepaper ---
+# --- Setup environment sebelum import qlp ---
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()   # config default
 os.environ["TZ"] = "Asia/Jakarta"
 time.tzset()
 
 import cairo
-import livepaper
+from qlp.render import draw_sky_overlay, full_state
+from qlp.scenes import SCENES, load_config
+from qlp.scenes.sea import draw_sea
+from qlp.sky import draw_sky_base
+from qlp.weather import WEATHER_FIXED
 
 
 def parse_size(s):
@@ -28,46 +32,46 @@ def parse_size(s):
 
 def bench(cases, size, frames, scene="sea"):
     w, h = size
-    cfg = livepaper.load_config()
+    cfg = load_config()
     cfg["scene"] = scene
     cfg["lightning"] = False
     h_sky = int(h * cfg["horizon"])
 
     # Cek apakah draw_sky_base menerima wx
-    sig = inspect.signature(livepaper.draw_sky_base)
+    sig = inspect.signature(draw_sky_base)
     wx_in_base = "wx" in sig.parameters
 
     results = []
 
     for name, waktu, cuaca in cases:
         now = datetime.datetime.strptime(waktu, "%Y-%m-%d %H:%M").astimezone()
-        a = livepaper.full_state(now, cfg)
-        wx = dict(livepaper.WEATHER_FIXED[cuaca], source=cuaca)
+        a = full_state(now, cfg)
+        wx = dict(WEATHER_FIXED[cuaca], source=cuaca)
         t0 = now.timestamp()
 
         # --- base ---
         base_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h_sky)
         if wx_in_base:
-            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx)
+            draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg, wx)
         else:
-            livepaper.draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg)
+            draw_sky_base(cairo.Context(base_surf), w, h_sky, a, t0, cfg)
         t_start = time.perf_counter()
         ctx_b = cairo.Context(base_surf)
         if wx_in_base:
-            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx)
+            draw_sky_base(ctx_b, w, h_sky, a, t0, cfg, wx)
         else:
-            livepaper.draw_sky_base(ctx_b, w, h_sky, a, t0, cfg)
+            draw_sky_base(ctx_b, w, h_sky, a, t0, cfg)
         base_ms = (time.perf_counter() - t_start) * 1000
 
         # --- laut / lembah (sesuai scene) ---
         sea_surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h - h_sky)
         # warmup
-        livepaper.draw_sea(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
+        draw_sea(cairo.Context(sea_surf), w, h - h_sky, a, t0, cfg, h_sky, wx)
         # measure
         sea_total = 0.0
         for k in range(frames):
             t_start = time.perf_counter()
-            livepaper.draw_sea(
+            draw_sea(
                 cairo.Context(sea_surf), w, h - h_sky, a,
                 t0 + k / cfg["fps"], cfg, h_sky, wx
             )
@@ -80,7 +84,7 @@ def bench(cases, size, frames, scene="sea"):
         ctx_s = cairo.Context(sky_surf)
         ctx_s.set_source_surface(base_surf, 0, 0)
         ctx_s.paint()
-        livepaper.draw_sky_overlay(ctx_s, w, h_sky, a, wx, t0, cfg, h)
+        draw_sky_overlay(ctx_s, w, h_sky, a, wx, t0, cfg, h)
         # measure
         sky_total = 0.0
         for k in range(frames):
@@ -88,7 +92,7 @@ def bench(cases, size, frames, scene="sea"):
             ctx_s = cairo.Context(sky_surf)           # seperti draw_sky_cb di run()
             ctx_s.set_source_surface(base_surf, 0, 0)
             ctx_s.paint()
-            livepaper.draw_sky_overlay(
+            draw_sky_overlay(
                 ctx_s, w, h_sky, a, wx, t0 + k / cfg["fps"], cfg, h
             )
             sky_total += time.perf_counter() - t_start
@@ -128,17 +132,17 @@ def print_table(results, size, frames, repeat, scene):
 
 def bench_full(cases, size, frames, scene):
     w, h = size
-    cfg = livepaper.load_config()
+    cfg = load_config()
     cfg["lightning"] = False
     cfg["scene"] = scene
-    render = livepaper.SCENES[scene]
+    render = SCENES[scene]
 
     results = []
 
     for gen, (name, waktu, cuaca) in enumerate(cases, 1):   # gen beda per kasus: cache langit diganti
         now = datetime.datetime.strptime(waktu, "%Y-%m-%d %H:%M").astimezone()
-        a = livepaper.full_state(now, cfg)
-        wx = dict(livepaper.WEATHER_FIXED[cuaca], source=cuaca)
+        a = full_state(now, cfg)
+        wx = dict(WEATHER_FIXED[cuaca], source=cuaca)
         t0 = now.timestamp()
 
         surf = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
@@ -186,11 +190,11 @@ def main():
                         help="Jumlah frame per pengukuran (default: 120)")
     parser.add_argument("--repeat", type=int, default=3,
                         help="Ulangi pengukuran, ambil tercepat (default: 3)")
-    parser.add_argument("--scene", default="sea", choices=sorted(livepaper.SCENES),
+    parser.add_argument("--scene", default="sea", choices=sorted(SCENES),
                         help="Pemandangan di bawah cakrawala (default: sea)")
     args = parser.parse_args()
 
-    scene_fn = livepaper.SCENES[args.scene]
+    scene_fn = SCENES[args.scene]
 
     if scene_fn is None:
         best = None
