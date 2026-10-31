@@ -44,7 +44,6 @@ import random
 import sys
 import time
 from datetime import datetime, timezone
-from qlp import config as _config
 from qlp.config import DEFAULTS
 from qlp.astro import (
     HERE, load_stars, D2R, MOON_SUN_RATIO, julian, lst_rad, altaz, ecl_to_eq, sun_ecl,
@@ -71,10 +70,7 @@ from qlp.scenes.valley import (
     _v_reflection, valley_anim, valley_birds, _v_skyline, _V_MIST, _v_mist_sprite, lake_mist,
     valley_birds_on, _V_FRAME, draw_valley_frame,
 )
-
-
-def load_config():
-    return _config.load_config(SCENES)
+from qlp.scenes import SCENES, load_config
 
 
 def draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total):
@@ -87,14 +83,6 @@ def draw_sky(ctx, w, h, a, t, cfg, wx=None, h_total=None):
     draw_sky_base(ctx, w, h, a, t, cfg, wx)
     if wx:
         draw_sky_overlay(ctx, w, h, a, wx, t, cfg, h_total or h)
-
-
-# scene: None = langit dan laut digambar terpisah (jalur lama), selain itu fungsi
-# yang menggambar satu bingkai layar penuh
-SCENES = {
-    "sea": None,
-    "valley": draw_valley_frame,
-}
 
 
 def draw_frame(ctx, w, h, a, wx, t, cfg, gen=0):
