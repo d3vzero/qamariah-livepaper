@@ -95,3 +95,9 @@ def draw_sea(ctx, w, h, a, t, cfg, h_sky, wx=None):
     ctx.restore()
     draw_rain(ctx, w, h_sky, h_sky + h, h_sky + h, wx, t)
     draw_lightning(ctx, wx, t, cfg)
+
+
+# antarmuka scene (dipindai qlp/scenes/__init__.py): NAME = nama di config/menu,
+# draw = fungsi bingkai layar penuh, atau None = langit dan laut digambar terpisah
+NAME = "sea"
+draw = None

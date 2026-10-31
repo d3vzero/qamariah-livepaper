@@ -432,3 +432,8 @@ def draw_valley_frame(ctx, W, H, a, wx, t, cfg, gen=0):
     # 5. hujan
     draw_rain(ctx, W, 0, H, H, wx, t)
     draw_lightning(ctx, wx, t, cfg)
+
+
+# antarmuka scene (lihat qlp/scenes/sea.py)
+NAME = "valley"
+draw = draw_valley_frame
